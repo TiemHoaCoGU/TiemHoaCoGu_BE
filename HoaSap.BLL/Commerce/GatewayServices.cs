@@ -39,7 +39,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
         if (options.Value.Provider == "MomoSandbox" && (request.Amount < 1_000m || request.Amount > 50_000_000m || decimal.Truncate(request.Amount) != request.Amount)) throw new BusinessException(400, "Thanh toán MoMo sandbox cần số tiền nguyên VND từ 1.000 đến 50.000.000.");
         if (options.Value.Provider == "VnPaySandbox" && (request.Amount < 5_000m || request.Amount > 1_000_000_000m || decimal.Truncate(request.Amount) != request.Amount)) throw new BusinessException(400, "Thanh toán VNPay sandbox cần số tiền nguyên VND từ 5.000 đến 1.000.000.000.");
         if (string.IsNullOrWhiteSpace(request.IdempotencyKey) || request.IdempotencyKey.Length > 100) throw new BusinessException(400, "IdempotencyKey bắt buộc, tối đa 100 ký tự.");
-        if (!Uri.TryCreate(request.ReturnUrl, UriKind.Absolute, out var returnUri) || returnUri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(returnUri.UserInfo)) throw new BusinessException(400, "ReturnUrl phải là HTTPS.");
+        if (!Uri.TryCreate(request.ReturnUrl, UriKind.Absolute, out var returnUri) || (!returnUri.IsLoopback && returnUri.Host != "localhost" && returnUri.Scheme != Uri.UriSchemeHttps) || !string.IsNullOrEmpty(returnUri.UserInfo)) throw new BusinessException(400, "ReturnUrl phải là HTTPS.");
         var cfg = options.Value;
         try { cfg.Validate(); } catch (InvalidOperationException) { throw new BusinessException(503, "Cổng thanh toán chưa được cấu hình hợp lệ."); }
         if (!cfg.IsAllowedReturnOrigin(returnUri)) throw new BusinessException(400, "ReturnUrl không nằm trong allowlist.");
