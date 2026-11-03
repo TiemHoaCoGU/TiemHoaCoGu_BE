@@ -31,7 +31,7 @@ public class CommerceGatewayOptions
         else if (Provider == "VnPaySandbox") ValidateVnPaySandbox();
         else if (Provider == "GenericSignedGateway") ValidateTransport();
         else throw new InvalidOperationException("Unsupported payment provider; only MoMo sandbox, VNPay sandbox or the explicitly configured generic test adapter is allowed.");
-        if (AllowedReturnOrigins.Length == 0 || AllowedReturnOrigins.Any(x => !Uri.TryCreate(x, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(u.PathAndQuery.Trim('/'))))
+        if (AllowedReturnOrigins.Length == 0 || AllowedReturnOrigins.Any(x => !Uri.TryCreate(x, UriKind.Absolute, out var u) || (!u.IsLoopback && u.Host != "localhost" && u.Scheme != Uri.UriSchemeHttps) || !string.IsNullOrEmpty(u.PathAndQuery.Trim('/'))))
             throw new InvalidOperationException("Commerce gateway return URL allowlist is required and must contain HTTPS origins only.");
     }
     private void ValidateVnPaySandbox()
