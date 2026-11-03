@@ -299,6 +299,94 @@ public sealed class VnPaySandboxPaymentGatewayTests
         Assert.True(replayResponse.Replay);
     }
 
+    [Fact]
+    public async Task SimulateSandboxWebhookAsync_Success_SettlesPaymentCorrectly()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+
+        var dbOptions = new DbContextOptionsBuilder<HoaSapDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new HoaSapDbContext(dbOptions);
+        await db.Database.EnsureCreatedAsync();
+
+        var customerId = Guid.NewGuid();
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            OrderCode = "ORD-SIM-001",
+            CustomerId = customerId,
+            OrderStatus = "Confirmed",
+            PaymentStatus = "Unpaid",
+            SubTotal = 300_000m,
+            TotalAmount = 300_000m,
+            ShippingAddress = "123 Test Street"
+        };
+        db.Customers.Add(new Customer { Id = customerId, Email = "sim1@example.com", FullName = "Tester 1" });
+        db.Orders.Add(order);
+        await db.SaveChangesAsync();
+
+        using var httpClient = new HttpClient();
+        using var gateway = new VnPaySandboxPaymentGateway(httpClient, CreateOptions());
+        var service = new GatewayPaymentService(db, gateway, CreateOptions());
+
+        var simResponse = await service.SimulateSandboxWebhookAsync(customerId, order.Id, true, "00");
+        Assert.True(simResponse.Accepted);
+
+        var updatedOrder = await db.Orders.SingleAsync(x => x.Id == order.Id);
+        Assert.Equal("Paid", updatedOrder.PaymentStatus);
+
+        var payment = await db.Payments.SingleAsync(x => x.OrderId == order.Id);
+        Assert.Equal("Paid", payment.PaymentStatus);
+        Assert.Equal("VnPaySandbox", payment.PaymentMethod);
+        Assert.Equal(300_000m, payment.Amount);
+    }
+
+    [Fact]
+    public async Task SimulateSandboxWebhookAsync_Canceled_LeavesOrderUnpaid()
+    {
+        using var connection = new SqliteConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+
+        var dbOptions = new DbContextOptionsBuilder<HoaSapDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new HoaSapDbContext(dbOptions);
+        await db.Database.EnsureCreatedAsync();
+
+        var customerId = Guid.NewGuid();
+        var order = new Order
+        {
+            Id = Guid.NewGuid(),
+            OrderCode = "ORD-SIM-002",
+            CustomerId = customerId,
+            OrderStatus = "Confirmed",
+            PaymentStatus = "Unpaid",
+            SubTotal = 250_000m,
+            TotalAmount = 250_000m,
+            ShippingAddress = "123 Test Street"
+        };
+        db.Customers.Add(new Customer { Id = customerId, Email = "sim2@example.com", FullName = "Tester 2" });
+        db.Orders.Add(order);
+        await db.SaveChangesAsync();
+
+        using var httpClient = new HttpClient();
+        using var gateway = new VnPaySandboxPaymentGateway(httpClient, CreateOptions());
+        var service = new GatewayPaymentService(db, gateway, CreateOptions());
+
+        var simResponse = await service.SimulateSandboxWebhookAsync(customerId, order.Id, false, "24");
+        Assert.True(simResponse.Accepted);
+
+        var updatedOrder = await db.Orders.SingleAsync(x => x.Id == order.Id);
+        Assert.Equal("Unpaid", updatedOrder.PaymentStatus);
+
+        var intent = await db.GatewayPaymentIntents.SingleAsync(x => x.OrderId == order.Id);
+        Assert.Equal("Canceled", intent.Status);
+    }
+
     private static Dictionary<string, string> ParseQuery(string query)
     {
         var dict = new Dictionary<string, string>();

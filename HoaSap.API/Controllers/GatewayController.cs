@@ -24,6 +24,21 @@ public sealed class GatewayController(GatewayPaymentService payments, GatewayRec
         request.OrderId = orderId; return payments.StartAsync(owner, request, ct);
     }
 
+    public sealed class SandboxSimulateRequest
+    {
+        public bool Success { get; set; } = true;
+        public string? ResponseCode { get; set; } = "00";
+    }
+
+    [HttpPost("orders/{orderId:guid}/simulate-sandbox"), Authorize]
+    public async Task<IActionResult> SimulateSandbox(Guid orderId, [FromBody] SandboxSimulateRequest? request, CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var owner)) throw new BusinessException(401, "Yêu cầu đăng nhập.");
+        var req = request ?? new SandboxSimulateRequest();
+        var result = await payments.SimulateSandboxWebhookAsync(owner, orderId, req.Success, req.ResponseCode, ct);
+        return Ok(new { success = req.Success, orderId, paymentStatus = req.Success ? "Paid" : "Unpaid" });
+    }
+
     [HttpGet("orders/{orderId:guid}/balance"), Authorize]
     public Task<OrderPaymentSummary> Balance(Guid orderId, CancellationToken ct)
     {
