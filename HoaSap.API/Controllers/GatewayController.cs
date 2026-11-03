@@ -13,7 +13,7 @@ public sealed class GatewayController(GatewayPaymentService payments, GatewayRec
     [HttpGet("availability"), AllowAnonymous]
     public object Availability()
     {
-        try { gatewayOptions.Value.Validate(); return new { provider = gatewayOptions.Value.Provider, ready = true, sandbox = gatewayOptions.Value.Provider == "MomoSandbox" }; }
+        try { gatewayOptions.Value.Validate(); return new { provider = gatewayOptions.Value.Provider, ready = true, sandbox = gatewayOptions.Value.Provider is "MomoSandbox" or "VnPaySandbox" }; }
         catch (InvalidOperationException) { return new { provider = gatewayOptions.Value.Provider, ready = false, sandbox = true }; }
     }
 
@@ -46,5 +46,67 @@ public sealed class GatewayController(GatewayPaymentService payments, GatewayRec
         using var stream = new MemoryStream(); await Request.Body.CopyToAsync(stream, ct);
         await payments.WebhookAsync(stream.ToArray(), Request.Headers["X-Signature"].FirstOrDefault(), Request.Headers["X-Timestamp"].FirstOrDefault(), ct);
         return NoContent();
+    }
+
+    [HttpGet("vnpay-ipn"), AllowAnonymous]
+    public async Task<IActionResult> VnPayIpnGet(CancellationToken ct)
+    {
+        var query = Request.QueryString.Value?.TrimStart('?');
+        if (string.IsNullOrEmpty(query))
+            return Ok(new { RspCode = "99", Message = "Missing query string" });
+
+        var raw = System.Text.Encoding.UTF8.GetBytes(query);
+        try
+        {
+            var result = await payments.WebhookAsync(raw, Request.Query["vnp_SecureHash"].FirstOrDefault(), null, ct);
+            if (result.Replay) return Ok(new { RspCode = "02", Message = "Order already confirmed" });
+            return Ok(new { RspCode = "00", Message = "Confirm Success" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 401)
+        {
+            return Ok(new { RspCode = "97", Message = "Invalid Checksum" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 404)
+        {
+            return Ok(new { RspCode = "01", Message = "Order not found" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 400 || ex.StatusCode == 409)
+        {
+            return Ok(new { RspCode = "04", Message = ex.Message });
+        }
+        catch
+        {
+            return Ok(new { RspCode = "99", Message = "Unknown error" });
+        }
+    }
+
+    [HttpPost("vnpay-ipn"), AllowAnonymous]
+    public async Task<IActionResult> VnPayIpnPost(CancellationToken ct)
+    {
+        using var stream = new MemoryStream();
+        await Request.Body.CopyToAsync(stream, ct);
+        var raw = stream.Length > 0 ? stream.ToArray() : System.Text.Encoding.UTF8.GetBytes(Request.QueryString.Value?.TrimStart('?') ?? "");
+        try
+        {
+            var result = await payments.WebhookAsync(raw, Request.Query["vnp_SecureHash"].FirstOrDefault() ?? Request.Headers["X-Signature"].FirstOrDefault(), null, ct);
+            if (result.Replay) return Ok(new { RspCode = "02", Message = "Order already confirmed" });
+            return Ok(new { RspCode = "00", Message = "Confirm Success" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 401)
+        {
+            return Ok(new { RspCode = "97", Message = "Invalid Checksum" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 404)
+        {
+            return Ok(new { RspCode = "01", Message = "Order not found" });
+        }
+        catch (BusinessException ex) when (ex.StatusCode == 400 || ex.StatusCode == 409)
+        {
+            return Ok(new { RspCode = "04", Message = ex.Message });
+        }
+        catch
+        {
+            return Ok(new { RspCode = "99", Message = "Unknown error" });
+        }
     }
 }
