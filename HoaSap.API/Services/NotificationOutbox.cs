@@ -17,6 +17,13 @@ public sealed class NotificationOptions
     public int LeaseSeconds { get; set; } = 120;
     public SmtpOptions Smtp { get; set; } = new();
     public SmsOptions Sms { get; set; } = new();
+    public ResendOptions Resend { get; set; } = new();
+}
+public sealed class ResendOptions
+{
+    public string ApiKey { get; set; } = "";
+    public string From { get; set; } = "Tiệm Hoa Có Gu <onboarding@resend.dev>";
+    public string BaseUrl { get; set; } = "https://api.resend.com";
 }
 public sealed class SmtpOptions
 {
@@ -174,8 +181,8 @@ public sealed class NotificationWorker(IServiceScopeFactory scopes, IEnumerable<
         foreach (var id in candidates)
         {
             var peek = await db.Set<NotificationOutbox>().AsNoTracking().SingleAsync(x => x.Id == id, ct);
-            var transport = transports.FirstOrDefault(x => x.Channel == peek.Channel);
-            if (transport is null || !transport.Enabled) continue; // disabled remains Pending and does not consume attempts
+            var transport = transports.FirstOrDefault(x => x.Channel == peek.Channel && x.Enabled);
+            if (transport is null) continue; // disabled remains Pending and does not consume attempts
             now = DateTime.UtcNow; lease = now.AddSeconds(Math.Clamp(options.Value.LeaseSeconds, 60, 3600));
             var claimed = await db.Set<NotificationOutbox>().Where(x => x.Id == id && x.Status == NotificationStatus.Pending && x.NextAttemptAtUtc <= now).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, NotificationStatus.Processing).SetProperty(x => x.LeaseOwner, owner).SetProperty(x => x.LeasedUntilUtc, lease), ct);
             if (claimed != 1) continue;

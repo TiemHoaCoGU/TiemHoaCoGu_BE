@@ -16,6 +16,13 @@ public sealed class PaymentsController(WorkshopService service) : ControllerBase
         return Ok(new { recorded = true });
     }
 
+    [HttpPost("booking/{bookingId:guid}/confirm"), Authorize(Roles = "Admin,Staff")]
+    public async Task<IActionResult> ConfirmBooking(Guid bookingId, ConfirmPaymentRequest r, CancellationToken ct)
+    {
+        await service.ConfirmBookingPaymentAsync(bookingId, r.TransactionCode, StaffId(), ct);
+        return Ok(new { confirmed = true });
+    }
+
     [HttpPost("order/{orderId:guid}"), Authorize(Roles = "Admin,Staff")]
     public async Task<IActionResult> Order(Guid orderId, ManualPaymentRequest r, CancellationToken ct)
     {

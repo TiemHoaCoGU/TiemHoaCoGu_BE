@@ -51,7 +51,9 @@ builder.Services.AddHttpClient<GhnStagingAddressCatalog>(client => client.Timeou
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<IGhnStagingAddressCatalog>(sp => sp.GetRequiredService<GhnStagingAddressCatalog>());
 builder.Services.AddSingleton<INotificationTransport, SmtpNotificationTransport>();
+builder.Services.AddSingleton<INotificationTransport, ResendEmailTransport>();
 builder.Services.AddSingleton<INotificationTransport, TwilioSmsNotificationTransport>();
+builder.Services.AddSingleton<WorkshopTicketCodec>();
 builder.Services.AddScoped<IAuditActor, HttpAuditActor>();
 builder.Services.AddDbContext<HoaSapDbContext>(options =>
 {

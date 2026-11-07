@@ -12,6 +12,9 @@ public sealed class BookingsController(WorkshopService service) : ControllerBase
     [HttpPost("sessions/{sessionId:guid}")] public Task<BookingDto> Hold(Guid sessionId, BookingRequest r, CancellationToken ct) => service.HoldBookingAsync(sessionId, r, UserId, ct);
     [HttpGet][Authorize] public Task<IReadOnlyList<BookingDto>> Mine(CancellationToken ct) => service.MyBookingsAsync(UserId ?? throw new HoaSap.BLL.BusinessException(401, "Yêu cầu đăng nhập."), ct);
     [HttpGet("{id:guid}")][Authorize] public Task<BookingDto> Get(Guid id, CancellationToken ct) => service.BookingAsync(id, UserId, Staff, ct);
+    [HttpGet("{id:guid}/ticket")][Authorize] public Task<TicketDto> Ticket(Guid id, CancellationToken ct) => service.TicketAsync(id, UserId, Staff, ct);
+    [HttpGet("tickets/{token}"), Authorize(Roles = "Admin,Staff")] public Task<TicketScanDto> Scan(string token, CancellationToken ct) => service.ScanAsync(token, ct);
+    [HttpPost("tickets/{token}/check-in"), Authorize(Roles = "Admin,Staff")] public Task<TicketScanDto> CheckInByToken(string token, CancellationToken ct) => service.CheckInByTokenAsync(token, ct);
     [HttpPost("{id:guid}/cancel")][Authorize] public Task Cancel(Guid id, [FromBody] string? reason, CancellationToken ct) => service.CancelBookingAsync(id, UserId, Staff, reason, ct);
     [HttpPost("{id:guid}/check-in"), Authorize(Roles = "Admin,Staff")] public Task CheckIn(Guid id, CancellationToken ct) => service.CheckInAsync(id, false, ct);
     [HttpPost("{id:guid}/no-show"), Authorize(Roles = "Admin,Staff")] public Task NoShow(Guid id, CancellationToken ct) => service.CheckInAsync(id, true, ct);
