@@ -141,9 +141,9 @@ public sealed class AdminProductRequest
     [StringLength(100)] public string? Section { get; set; }
     public bool IsCustomizable { get; set; }
     [Range(1, 1000000)] public int? ShippingWeightGrams { get => _shippingWeightGrams; set { _shippingWeightGrams = value; PackagingFieldsWereProvided = true; } }
-    [Range(typeof(decimal), "0.01", "10000")] public decimal? PackageLengthCm { get => _packageLengthCm; set { _packageLengthCm = value; PackagingFieldsWereProvided = true; } }
-    [Range(typeof(decimal), "0.01", "10000")] public decimal? PackageWidthCm { get => _packageWidthCm; set { _packageWidthCm = value; PackagingFieldsWereProvided = true; } }
-    [Range(typeof(decimal), "0.01", "10000")] public decimal? PackageHeightCm { get => _packageHeightCm; set { _packageHeightCm = value; PackagingFieldsWereProvided = true; } }
+    [Range(typeof(decimal), "0.01", "10000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal? PackageLengthCm { get => _packageLengthCm; set { _packageLengthCm = value; PackagingFieldsWereProvided = true; } }
+    [Range(typeof(decimal), "0.01", "10000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal? PackageWidthCm { get => _packageWidthCm; set { _packageWidthCm = value; PackagingFieldsWereProvided = true; } }
+    [Range(typeof(decimal), "0.01", "10000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal? PackageHeightCm { get => _packageHeightCm; set { _packageHeightCm = value; PackagingFieldsWereProvided = true; } }
     public bool PackagingSpecsConfirmed { get => _packagingSpecsConfirmed; set { _packagingSpecsConfirmed = value; PackagingFieldsWereProvided = true; } }
     [JsonIgnore] public bool PackagingFieldsWereProvided { get; private set; }
     public bool IsPreOrder { get; set; }
@@ -163,9 +163,9 @@ public sealed class AdminVoucherRequest
     [Required, StringLength(40)] public string Code { get; set; } = "";
     [StringLength(1000)] public string? Description { get; set; }
     [Required] public string DiscountType { get; set; } = "Percentage";
-    [Range(typeof(decimal), "0.01", "1000000000")] public decimal DiscountValue { get; set; }
-    [Range(typeof(decimal), "0", "1000000000")] public decimal MinOrderAmount { get; set; }
-    [Range(typeof(decimal), "0", "1000000000")] public decimal? MaxDiscountAmount { get; set; }
+    [Range(typeof(decimal), "0.01", "1000000000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal DiscountValue { get; set; }
+    [Range(typeof(decimal), "0", "1000000000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal MinOrderAmount { get; set; }
+    [Range(typeof(decimal), "0", "1000000000", ParseLimitsInInvariantCulture = true, ConvertValueInInvariantCulture = true)] public decimal? MaxDiscountAmount { get; set; }
     public DateTime StartDate { get; set; }
     public DateTime EndDate { get; set; }
     [Range(1, int.MaxValue)] public int UsageLimit { get; set; }

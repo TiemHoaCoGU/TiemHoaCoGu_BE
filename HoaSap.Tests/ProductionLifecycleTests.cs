@@ -91,6 +91,9 @@ public sealed class ProductionLifecycleTests
             var delivery = await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } })); delivery.EnsureSuccessStatusCode(); using var dd = JsonDocument.Parse(await delivery.Content.ReadAsStringAsync()); var did = dd.RootElement.GetProperty("id").GetGuid();
             Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync($"/api/orders/{order}/deliveries/{did}/status", Json(new { status = "Completed" }))).StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, (await other.GetAsync($"/api/orders/{order}/deliveries")).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await other.GetAsync($"/api/orders/{order}/deliveries/{did}/tracking")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await c.GetAsync($"/api/orders/{order}/deliveries/{did}/tracking")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync($"/api/orders/{order}/deliveries/{did}/tracking")).StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, (await c.GetAsync($"/api/orders/{Guid.NewGuid()}/deliveries")).StatusCode);
             Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/payments/order/{order}", Json(new { transactionCode = "PAY-" + Guid.NewGuid(), paymentMethod = "Cash", amount = 142000m }))).StatusCode);
             Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Delivering" }))).StatusCode);

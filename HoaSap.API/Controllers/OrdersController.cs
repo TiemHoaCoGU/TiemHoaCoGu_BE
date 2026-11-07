@@ -18,5 +18,5 @@ public sealed class OrdersController(CommerceService service) : ControllerBase
     [HttpPost("{id:guid}/status"), Authorize(Roles = "Admin,Staff")] public async Task<IActionResult> Status(Guid id, StatusRequest r, CancellationToken ct) { await service.TransitionAsync(id, r.Status, ct); return NoContent(); }
     [HttpPost("{id:guid}/deliveries"), Authorize(Roles = "Admin,Staff")] public Task<DeliveryDto> Delivery(Guid id, DeliveryRequest r, CancellationToken ct) => service.DeliveryAsync(id, r, ct);
     [HttpPost("{id:guid}/deliveries/{deliveryId:guid}/status"), Authorize(Roles = "Admin,Staff")] public Task<DeliveryDto> DeliveryStatus(Guid id, Guid deliveryId, StatusRequest r, CancellationToken ct) => service.TransitionDeliveryAsync(id, deliveryId, r.Status, ct);
-    [HttpGet("{id:guid}/deliveries/{deliveryId:guid}/tracking"), Authorize] public Task<CarrierTrackingResult> Tracking(Guid id, Guid deliveryId, CancellationToken ct) => service.TrackDeliveryAsync(id, deliveryId, ct);
+    [HttpGet("{id:guid}/deliveries/{deliveryId:guid}/tracking"), Authorize] public Task<CarrierTrackingResult> Tracking(Guid id, Guid deliveryId, CancellationToken ct) => service.TrackDeliveryAsync(id, deliveryId, Me(), User.IsInRole("Admin") || User.IsInRole("Staff"), ct);
 }
