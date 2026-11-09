@@ -406,9 +406,10 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return ToDto(delivery);
     }
 
-    public async Task<CarrierTrackingResult> TrackDeliveryAsync(Guid orderId, Guid deliveryId, CancellationToken ct = default)
+    public async Task<CarrierTrackingResult> TrackDeliveryAsync(Guid orderId, Guid deliveryId, Guid? customerId, bool staff, CancellationToken ct = default)
     {
         var delivery = await db.Deliveries.AsNoTracking().SingleOrDefaultAsync(x => x.Id == deliveryId && x.OrderId == orderId, ct) ?? throw NF("Không tìm thấy giao hàng");
+        if (!staff && !await db.Orders.AnyAsync(x => x.Id == orderId && x.CustomerId == customerId, ct)) throw NF("Không tìm thấy giao hàng");
         if (string.IsNullOrWhiteSpace(delivery.TrackingNumber) || carrier is null or DisabledCarrier)
             return new CarrierTrackingResult(true, delivery.TrackingNumber, delivery.DeliveryStatus, "Local tracking", DateTime.UtcNow, null);
         return await carrier.TrackShipmentAsync(delivery.TrackingNumber, ct);
