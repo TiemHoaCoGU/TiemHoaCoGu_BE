@@ -17,6 +17,8 @@ public sealed class CustomOrdersController(CustomOrderService service) : Control
     public Task<CustomRequestDto> Create(CustomRequestInput input, CancellationToken ct) => service.CreateAsync(CustomerId, input, ct);
     [HttpPut("{id:guid}")]
     public Task<CustomRequestDto> Revise(Guid id, CustomRequestInput input, CancellationToken ct) => service.ReviseRequestAsync(id, CustomerId, input, ct);
+    [HttpPost("{id:guid}/cancel")]
+    public Task<CustomRequestDto> Cancel(Guid id, CancellationToken ct) => service.CancelRequestAsync(id, CustomerId, Admin, ct);
     [HttpGet]
     public Task<IReadOnlyList<CustomRequestDto>> Mine(CancellationToken ct) => Staff ? service.StaffRequestsAsync(ct) : service.MineAsync(CustomerId, ct);
     [HttpGet("{id:guid}")]

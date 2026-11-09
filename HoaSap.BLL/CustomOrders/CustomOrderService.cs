@@ -1,12 +1,14 @@
 using System.ComponentModel.DataAnnotations;
 using System.Data;
+using System.Text.RegularExpressions;
 using HoaSap.DAL;
 using HoaSap.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace HoaSap.BLL.CustomOrders;
 
-public sealed record CustomRequestDto(Guid Id, Guid ProductId, int Quantity, string Description, string ReferenceImageUrl, DateTime? RequestedCompletionDate, string Status, DateTime CreatedAt);
+public sealed record CustomRequestDto(Guid Id, Guid ProductId, int Quantity, string Description, string ReferenceImageUrl, DateTime? RequestedCompletionDate, string Status, DateTime CreatedAt,
+    string ProductName, DateTime UpdatedAt, int QuoteVersion, Guid? OrderId, string? OrderCode, bool DepositReady, bool FullyPaid, bool DeliveryComplete);
 public sealed record CustomQuoteRevisionDto(int Version, decimal? UnitPrice, decimal? TotalAmount, decimal? DepositAmount, decimal PaidAmount, decimal BalanceAmount, DateTime CompletionDate, DateTime ExpiresAt, string AdminNote, DateTime CreatedAt, string Status);
 public sealed record CustomQuoteDto(Guid Id, Guid RequestId, int CurrentRevision, string Status, DateTime? ExpiresAt, IReadOnlyList<CustomQuoteRevisionDto> Revisions, Guid? OrderId, decimal PaidAmount, decimal BalanceAmount);
 public sealed class CustomRequestInput
@@ -16,6 +18,7 @@ public sealed class CustomRequestInput
     [Required, MaxLength(4000)] public string Description { get; set; } = "";
     [Url, MaxLength(2000)] public string? ReferenceImageUrl { get; set; }
     public DateTime? RequestedCompletionDate { get; set; }
+    public int? QuoteVersion { get; set; }
 }
 public sealed class CustomQuoteInput
 {
@@ -29,6 +32,8 @@ public sealed class CustomApproveInput { [Range(1, int.MaxValue)] public int Ver
 public sealed class CustomCheckoutInput
 {
     [Required, MaxLength(2000)] public string ShippingAddress { get; set; } = "";
+    [MaxLength(100)] public string? ReceiverName { get; set; }
+    [MaxLength(20)] public string? ReceiverPhone { get; set; }
     [MaxLength(1000)] public string? Note { get; set; }
     [Required, MaxLength(100)] public string IdempotencyKey { get; set; } = "";
 }
@@ -38,36 +43,77 @@ public sealed record CustomLifecycleDto(Guid RequestId, Guid OrderId, string Sta
 /// <summary>Made-to-order quotations do not reserve stock from the ready-made catalog.</summary>
 public sealed class CustomOrderService(HoaSapDbContext db)
 {
+    private static readonly Regex PhonePattern = new(@"^[+0-9 ()\-]{9,20}$", RegexOptions.CultureInvariant);
     private static BusinessException Error(int code, string message) => new(code, message);
     private static DateTime Utc(DateTime value) => value.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : value.ToUniversalTime();
 
     public async Task<CustomRequestDto> CreateAsync(Guid customerId, CustomRequestInput input, CancellationToken ct = default)
     {
         await ValidateRequestAsync(input, ct);
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var description = input.Description.Trim();
+        var image = input.ReferenceImageUrl?.Trim() ?? "";
+        var date = input.RequestedCompletionDate is { } value ? Utc(value) : (DateTime?)null;
+        var since = DateTime.UtcNow.AddMinutes(-10);
+        var existing = await db.Set<CustomOrderRequest>().AsNoTracking()
+            .Where(x => x.CustomerId == customerId && x.ProductId == input.ProductId && x.Quantity == input.Quantity && x.Description == description &&
+                        x.ReferenceImageUrl == image && x.RequestedCompletionDate == date && x.Status == "Requested" && x.CreatedAt >= since)
+            .OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync(ct);
+        if (existing is not null) { await tx.CommitAsync(ct); return (await MapAsync([existing], ct))[0]; }
         var request = new CustomOrderRequest { CustomerId = customerId };
         Apply(request, input);
         db.Add(request);
         db.Add(new CustomQuotation { CustomOrderRequestId = request.Id });
         await db.SaveChangesAsync(ct);
-        return Map(request);
+        await tx.CommitAsync(ct);
+        return (await MapAsync([request], ct))[0];
     }
 
     public async Task<IReadOnlyList<CustomRequestDto>> MineAsync(Guid customerId, CancellationToken ct = default) =>
-        (await db.Set<CustomOrderRequest>().AsNoTracking().Where(x => x.CustomerId == customerId).OrderByDescending(x => x.CreatedAt).Take(200).ToListAsync(ct)).Select(Map).ToList();
+        await MapAsync(await db.Set<CustomOrderRequest>().AsNoTracking().Where(x => x.CustomerId == customerId).OrderByDescending(x => x.CreatedAt).Take(200).ToListAsync(ct), ct);
 
     public async Task<IReadOnlyList<CustomRequestDto>> StaffRequestsAsync(CancellationToken ct = default) =>
-        (await db.Set<CustomOrderRequest>().AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(200).ToListAsync(ct)).Select(Map).ToList();
+        await MapAsync(await db.Set<CustomOrderRequest>().AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(200).ToListAsync(ct), ct);
 
     public async Task<CustomRequestDto> ReviseRequestAsync(Guid id, Guid customerId, CustomRequestInput input, CancellationToken ct = default)
     {
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var request = await OwnedAsync(id, customerId, ct);
-        if (request.Status != "Requested") throw Error(409, "Yêu cầu đã báo giá; vui lòng yêu cầu một phiên bản báo giá mới.");
+        var quote = await db.Set<CustomQuotation>().SingleAsync(x => x.CustomOrderRequestId == id, ct);
+        if (await db.Set<CustomOrderCheckout>().AnyAsync(x => x.CustomQuotationId == quote.Id, ct) || request.Status is not ("Requested" or "Quoted" or "Approved"))
+            throw Error(409, "Yêu cầu đã tạo đơn hoặc không thể sửa ở trạng thái hiện tại.");
+        if (input.QuoteVersion is { } version && version != quote.CurrentRevision) throw Error(409, "Báo giá vừa thay đổi, vui lòng tải lại trước khi sửa.");
         await ValidateRequestAsync(input, ct);
+        var wasQuoted = request.Status is "Quoted" or "Approved";
         Apply(request, input);
+        if (wasQuoted)
+        {
+            var current = await db.Set<CustomQuotationRevision>().SingleOrDefaultAsync(x => x.CustomQuotationId == quote.Id && x.Version == quote.CurrentRevision, ct);
+            if (current is not null && current.Status is "Sent" or "Approved") current.Status = "Superseded";
+            quote.Status = request.Status = "Requested";
+            quote.ExpiresAt = null;
+            quote.UpdatedAt = request.UpdatedAt = DateTime.UtcNow;
+        }
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return Map(request);
+        return (await MapAsync([request], ct))[0];
+    }
+
+    public async Task<CustomRequestDto> CancelRequestAsync(Guid id, Guid customerId, bool admin, CancellationToken ct = default)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var request = await db.Set<CustomOrderRequest>().SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw Error(404, "Không tìm thấy yêu cầu.");
+        if (!admin && request.CustomerId != customerId) throw Error(403, "Bạn không có quyền với yêu cầu này.");
+        var quote = await db.Set<CustomQuotation>().SingleAsync(x => x.CustomOrderRequestId == id, ct);
+        if (request.Status == "Cancelled") { await tx.CommitAsync(ct); return (await MapAsync([request], ct))[0]; }
+        if (await db.Set<CustomOrderCheckout>().AnyAsync(x => x.CustomQuotationId == quote.Id, ct))
+            throw Error(409, "Yêu cầu đã tạo đơn; hãy hủy đơn hàng (chỉ khi chưa thanh toán).");
+        if (request.Status is not ("Requested" or "Quoted" or "Approved")) throw Error(409, "Yêu cầu không thể hủy ở trạng thái hiện tại.");
+        quote.Status = request.Status = "Cancelled";
+        quote.UpdatedAt = request.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return (await MapAsync([request], ct))[0];
     }
 
     public async Task<CustomQuoteDto> QuoteAsync(Guid id, Guid? customerId, bool staff, bool admin, CancellationToken ct = default)
@@ -103,7 +149,7 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         var revision = new CustomQuotationRevision
         {
             CustomQuotationId = quote.Id, Version = quote.CurrentRevision + 1, UnitPrice = input.UnitPrice, Quantity = request.Quantity,
-            TotalAmount = total, DepositAmount = decimal.Round(total * input.DepositPercent / 100m, 2, MidpointRounding.AwayFromZero),
+            TotalAmount = total, DepositAmount = Math.Min(total, decimal.Round(total * input.DepositPercent / 100m, 0, MidpointRounding.AwayFromZero)),
             CompletionDate = completion, ExpiresAt = expiry, CreatedBy = adminId, AdminNote = input.AdminNote.Trim()
         };
         db.Add(revision);
@@ -139,15 +185,20 @@ public sealed class CustomOrderService(HoaSapDbContext db)
     public async Task<CustomCheckoutDto> CheckoutAsync(Guid id, Guid customerId, CustomCheckoutInput input, CancellationToken ct = default)
     {
         if (input is null || string.IsNullOrWhiteSpace(input.IdempotencyKey) || input.IdempotencyKey.Length > 100 || string.IsNullOrWhiteSpace(input.ShippingAddress)) throw Error(400, "Thiếu địa chỉ hoặc mã idempotency.");
+        if (!string.IsNullOrWhiteSpace(input.ReceiverPhone) && !PhonePattern.IsMatch(input.ReceiverPhone.Trim())) throw Error(400, "Số điện thoại người nhận không hợp lệ.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var request = await OwnedAsync(id, customerId, ct);
         var quote = await db.Set<CustomQuotation>().SingleAsync(x => x.CustomOrderRequestId == id, ct);
+        var customer = await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId, ct);
+        var receiverName = string.IsNullOrWhiteSpace(input.ReceiverName) ? customer?.FullName ?? "" : input.ReceiverName.Trim();
+        var receiverPhone = string.IsNullOrWhiteSpace(input.ReceiverPhone) ? customer?.PhoneNumber ?? "" : input.ReceiverPhone.Trim();
+        var address = $"ReceiverName: {receiverName}; ReceiverPhone: {receiverPhone}; ReceiverEmail: {customer?.Email ?? ""}; Address: {input.ShippingAddress.Trim()}";
         var key = input.IdempotencyKey.Trim();
         var old = await db.Set<CustomOrderCheckout>().SingleOrDefaultAsync(x => x.CustomerId == customerId && x.IdempotencyKey == key, ct);
         if (old is not null)
         {
             var order = await db.Orders.SingleAsync(x => x.Id == old.OrderId, ct);
-            if (old.CustomQuotationId != quote.Id || order.ShippingAddress != input.ShippingAddress.Trim() || order.Note != (input.Note?.Trim() ?? ""))
+            if (old.CustomQuotationId != quote.Id || order.ShippingAddress != address || order.Note != (input.Note?.Trim() ?? ""))
                 throw Error(409, "Mã idempotency đã dùng cho nội dung khác.");
             var oldRevision = await db.Set<CustomQuotationRevision>().SingleAsync(x => x.CustomQuotationId == quote.Id && x.Version == old.QuotationVersion, ct);
             await tx.CommitAsync(ct);
@@ -159,7 +210,7 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         var created = new Order
         {
             CustomerId = customerId, OrderCode = $"CUS-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}", SubTotal = revision.TotalAmount, TotalAmount = revision.TotalAmount,
-            OrderStatus = "Confirmed", PaymentStatus = revision.TotalAmount == 0 ? "Paid" : "Unpaid", ShippingAddress = input.ShippingAddress.Trim(), Note = input.Note?.Trim() ?? ""
+            OrderStatus = "Confirmed", PaymentStatus = revision.TotalAmount == 0 ? "Paid" : "Unpaid", ShippingAddress = address, Note = input.Note?.Trim() ?? ""
         };
         // The accepted quote is an all-inclusive price. Delivery is created by operations after production starts.
         created.Items.Add(new OrderItem { OrderId = created.Id, ProductId = request.ProductId, Quantity = request.Quantity, UnitPrice = revision.UnitPrice, FinalPrice = revision.UnitPrice, CustomNote = request.Description, ReferenceImageUrl = request.ReferenceImageUrl });
@@ -241,5 +292,61 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         return new(request, quote, revision, order, await PaidAsync(order.Id, ct));
     }
     private static CustomLifecycleDto ToLifecycle(LifecycleState state, string status, string delivery) => new(state.Request.Id, state.Order.Id, status, state.Revision.CompletionDate, state.Request.ProductionStartedAt, state.Request.CompletedAt, state.Revision.DepositAmount, state.Paid, Math.Max(0, state.Revision.TotalAmount - state.Paid), delivery);
-    private static CustomRequestDto Map(CustomOrderRequest request) => new(request.Id, request.ProductId, request.Quantity, request.Description, request.ReferenceImageUrl, request.RequestedCompletionDate, request.Status, request.CreatedAt);
+
+    /// <summary>Batched projection: one small query per related table, never per request row.</summary>
+    private async Task<IReadOnlyList<CustomRequestDto>> MapAsync(IReadOnlyList<CustomOrderRequest> requests, CancellationToken ct)
+    {
+        if (requests.Count == 0) return [];
+        var requestIds = requests.Select(x => x.Id).ToList();
+        var productIds = requests.Select(x => x.ProductId).Distinct().ToList();
+        var names = await db.Products.AsNoTracking().Where(x => productIds.Contains(x.Id)).Select(x => new { x.Id, x.Name }).ToDictionaryAsync(x => x.Id, x => x.Name, ct);
+        var quotes = await db.Set<CustomQuotation>().AsNoTracking().Where(x => requestIds.Contains(x.CustomOrderRequestId)).ToDictionaryAsync(x => x.CustomOrderRequestId, ct);
+        var quoteIds = quotes.Values.Select(x => x.Id).Distinct().ToList();
+        var checkouts = new Dictionary<Guid, CustomOrderCheckout>();
+        var orderCodes = new Dictionary<Guid, string>();
+        var paid = new Dictionary<Guid, decimal>();
+        var revisions = new Dictionary<(Guid QuoteId, int Version), (decimal Deposit, decimal Total)>();
+        var items = new List<(Guid Id, Guid OrderId, int Quantity)>();
+        var delivered = new Dictionary<Guid, int>();
+        if (quoteIds.Count > 0)
+        {
+            foreach (var checkout in await db.Set<CustomOrderCheckout>().AsNoTracking().Where(x => quoteIds.Contains(x.CustomQuotationId)).ToListAsync(ct)) checkouts[checkout.CustomQuotationId] = checkout;
+            foreach (var revision in await db.Set<CustomQuotationRevision>().AsNoTracking().Where(x => quoteIds.Contains(x.CustomQuotationId))
+                         .Select(x => new { x.CustomQuotationId, x.Version, x.DepositAmount, x.TotalAmount }).ToListAsync(ct))
+                revisions[(revision.CustomQuotationId, revision.Version)] = (revision.DepositAmount, revision.TotalAmount);
+        }
+        var orderIds = checkouts.Values.Select(x => x.OrderId).Distinct().ToList();
+        if (orderIds.Count > 0)
+        {
+            foreach (var order in await db.Orders.AsNoTracking().Where(x => orderIds.Contains(x.Id)).Select(x => new { x.Id, x.OrderCode }).ToListAsync(ct)) orderCodes[order.Id] = order.OrderCode;
+            // SQLite cannot sum decimals server-side; group in memory over the bounded order set.
+            foreach (var payment in await db.Payments.AsNoTracking().Where(x => x.OrderId != null && orderIds.Contains(x.OrderId.Value) && x.PaymentStatus == "Paid")
+                         .Select(x => new { OrderId = x.OrderId!.Value, x.Amount }).ToListAsync(ct)) paid[payment.OrderId] = paid.GetValueOrDefault(payment.OrderId) + payment.Amount;
+            foreach (var item in await db.OrderItems.AsNoTracking().Where(x => orderIds.Contains(x.OrderId)).Select(x => new { x.Id, x.OrderId, x.Quantity }).ToListAsync(ct)) items.Add((item.Id, item.OrderId, item.Quantity));
+        }
+        var itemIds = items.Select(x => x.Id).ToList();
+        if (itemIds.Count > 0)
+            foreach (var line in await db.DeliveryItems.AsNoTracking().Where(x => itemIds.Contains(x.OrderItemId) && db.Deliveries.Any(d => d.Id == x.DeliveryId && d.DeliveryStatus == "Delivered"))
+                         .GroupBy(x => x.OrderItemId).Select(g => new { OrderItemId = g.Key, Quantity = g.Sum(x => x.ShippedQuantity) }).ToListAsync(ct)) delivered[line.OrderItemId] = line.Quantity;
+        return requests.Select(request =>
+        {
+            quotes.TryGetValue(request.Id, out var quote);
+            var checkout = quote is not null && checkouts.TryGetValue(quote.Id, out var found) ? found : null;
+            Guid? orderId = null; string? orderCode = null; bool depositReady = false, fullyPaid = false, deliveryComplete = false;
+            if (checkout is not null)
+            {
+                orderId = checkout.OrderId;
+                orderCode = orderCodes.GetValueOrDefault(checkout.OrderId);
+                var paidAmount = paid.GetValueOrDefault(checkout.OrderId);
+                if (revisions.TryGetValue((checkout.CustomQuotationId, checkout.QuotationVersion), out var revision))
+                {
+                    depositReady = paidAmount >= revision.Deposit;
+                    fullyPaid = paidAmount >= revision.Total;
+                }
+                deliveryComplete = !items.Where(x => x.OrderId == checkout.OrderId).Any(x => delivered.GetValueOrDefault(x.Id) < x.Quantity);
+            }
+            return new CustomRequestDto(request.Id, request.ProductId, request.Quantity, request.Description, request.ReferenceImageUrl, request.RequestedCompletionDate, request.Status, request.CreatedAt,
+                names.GetValueOrDefault(request.ProductId) ?? "", request.UpdatedAt, quote?.CurrentRevision ?? 0, orderId, orderCode, depositReady, fullyPaid, deliveryComplete);
+        }).ToList();
+    }
 }

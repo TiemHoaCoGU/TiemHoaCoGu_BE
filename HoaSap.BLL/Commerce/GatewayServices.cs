@@ -37,8 +37,9 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
     {
         if (request is null || request.Amount <= 0 || decimal.Round(request.Amount, 2) != request.Amount) throw new BusinessException(400, "Số tiền không hợp lệ.");
         if (options.Value.Provider == "MomoSandbox" && (request.Amount < 1_000m || request.Amount > 50_000_000m || decimal.Truncate(request.Amount) != request.Amount)) throw new BusinessException(400, "Thanh toán MoMo sandbox cần số tiền nguyên VND từ 1.000 đến 50.000.000.");
+        if (options.Value.Provider == "VnPaySandbox" && (request.Amount < 5_000m || request.Amount > 1_000_000_000m || decimal.Truncate(request.Amount) != request.Amount)) throw new BusinessException(400, "Thanh toán VNPay sandbox cần số tiền nguyên VND từ 5.000 đến 1.000.000.000.");
         if (string.IsNullOrWhiteSpace(request.IdempotencyKey) || request.IdempotencyKey.Length > 100) throw new BusinessException(400, "IdempotencyKey bắt buộc, tối đa 100 ký tự.");
-        if (!Uri.TryCreate(request.ReturnUrl, UriKind.Absolute, out var returnUri) || returnUri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(returnUri.UserInfo)) throw new BusinessException(400, "ReturnUrl phải là HTTPS.");
+        if (!Uri.TryCreate(request.ReturnUrl, UriKind.Absolute, out var returnUri) || (!returnUri.IsLoopback && returnUri.Host != "localhost" && returnUri.Scheme != Uri.UriSchemeHttps) || !string.IsNullOrEmpty(returnUri.UserInfo)) throw new BusinessException(400, "ReturnUrl phải là HTTPS.");
         var cfg = options.Value;
         try { cfg.Validate(); } catch (InvalidOperationException) { throw new BusinessException(503, "Cổng thanh toán chưa được cấu hình hợp lệ."); }
         if (!cfg.IsAllowedReturnOrigin(returnUri)) throw new BusinessException(400, "ReturnUrl không nằm trong allowlist.");
@@ -104,7 +105,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
 
     public async Task<GatewayPaymentQueryResult> QueryAsync(Guid intentId, CancellationToken ct = default)
     {
-        if (options.Value.Provider != "MomoSandbox") throw new BusinessException(409, "Chỉ bật truy vấn giao dịch MoMo sandbox trong môi trường kiểm thử.");
+        if (options.Value.Provider is not ("MomoSandbox" or "VnPaySandbox")) throw new BusinessException(409, "Chỉ bật truy vấn giao dịch sandbox trong môi trường kiểm thử.");
         var intent = await db.GatewayPaymentIntents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == intentId, ct) ?? throw new BusinessException(404, "Không tìm thấy giao dịch cần đối soát.");
         try { return await gateway.QueryAsync(intent.ProviderKey, intent.Amount, ct); }
         catch (NotSupportedException) { throw new BusinessException(409, "Nhà cung cấp hiện tại không hỗ trợ truy vấn giao dịch."); }
@@ -118,11 +119,14 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
         try { payload = gateway.ParseWebhook(raw.Span); }
         catch (JsonException) { throw new BusinessException(400, "Webhook không hợp lệ."); }
         var code = string.IsNullOrWhiteSpace(payload.ProviderTransactionId) ? payload.TransactionCode?.Trim() ?? "" : payload.ProviderTransactionId.Trim();
-        var isMomo = !string.IsNullOrWhiteSpace(payload.ProviderKey);
+        var isProviderRouted = !string.IsNullOrWhiteSpace(payload.ProviderKey);
+        var isMomo = isProviderRouted && gateway.PaymentMethod == "MoMoSandbox";
+        var isVnPay = isProviderRouted && gateway.PaymentMethod == "VnPaySandbox";
         if ((string.Equals(payload.Status, "paid", StringComparison.OrdinalIgnoreCase) && code.Length is 0 or > 100) || (code.Length > 100) || payload.Amount <= 0 || decimal.Round(payload.Amount, 2) != payload.Amount || payload.Currency != "VND") throw new BusinessException(400, "Tiền tệ hoặc số tiền webhook không hợp lệ.");
-        if (isMomo && (gateway.PaymentMethod != "MoMoSandbox" || !payload.ProviderKey.StartsWith("intent:", StringComparison.Ordinal) || payload.ProviderKey.Length != 39 || payload.ProviderOrderId != "I" + payload.ProviderKey["intent:".Length..])) throw new BusinessException(400, "Mã đơn MoMo không hợp lệ.");
+        if (isMomo && (!payload.ProviderKey.StartsWith("intent:", StringComparison.Ordinal) || payload.ProviderKey.Length != 39 || payload.ProviderOrderId != "I" + payload.ProviderKey["intent:".Length..])) throw new BusinessException(400, "Mã đơn MoMo không hợp lệ.");
+        if (isVnPay && (!payload.ProviderKey.StartsWith("intent:", StringComparison.Ordinal) || payload.ProviderKey.Length != 39 || payload.ProviderOrderId != "I" + payload.ProviderKey["intent:".Length..])) throw new BusinessException(400, "Mã đơn VNPay không hợp lệ.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        var intent = isMomo
+        var intent = isProviderRouted
             ? await db.GatewayPaymentIntents.SingleOrDefaultAsync(x => x.ProviderKey == payload.ProviderKey, ct)
             : await db.GatewayPaymentIntents.SingleOrDefaultAsync(x => x.TransactionCode == code, ct);
         if (intent is null) throw new BusinessException(404, "Không tìm thấy giao dịch đã khởi tạo.");
@@ -154,7 +158,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
             if (intent.TransactionCode != code) throw new BusinessException(409, "Mã giao dịch nhà cung cấp không khớp biên nhận đã lưu.");
             await tx.CommitAsync(ct); return new(true, true, intent.OrderId);
         }
-        if (intent.ReconciliationStatus == "ReconciliationRequired" && !isMomo) { await tx.CommitAsync(ct); return new(true, true, intent.OrderId); }
+        if (intent.ReconciliationStatus == "ReconciliationRequired" && !isProviderRouted) { await tx.CommitAsync(ct); return new(true, true, intent.OrderId); }
         var order = await db.Orders.SingleAsync(x => x.Id == intent.OrderId, ct);
         var paid = await PaidAsync(order.Id, ct);
         if (await db.Payments.AnyAsync(x => x.TransactionCode == code && x.OrderId != intent.OrderId, ct))
@@ -162,7 +166,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
             intent.ReconciliationStatus = "ReconciliationRequired"; if (payment is not null) payment.PaymentStatus = "ReconciliationRequired"; intent.UpdatedAtUtc = DateTime.UtcNow;
             await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return new(true, false, intent.OrderId);
         }
-        var canSettle = (intent.Status is "Accepted" or "Unknown" or "Pending") && (isMomo || payment?.PaymentStatus == "Pending")
+        var canSettle = (intent.Status is "Accepted" or "Unknown" or "Pending") && (isProviderRouted || payment?.PaymentStatus == "Pending")
             && (order.OrderStatus is "Confirmed" or "Processing" or "Delivering") && paid + intent.Amount <= order.TotalAmount;
         if (!canSettle)
         {
@@ -178,6 +182,95 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
         intent.TransactionCode = code; intent.Status = "Paid"; intent.ReconciliationStatus = "ResolvedPaid"; intent.UpdatedAtUtc = DateTime.UtcNow;
         order.PaymentStatus = paid + intent.Amount >= order.TotalAmount ? "Paid" : "PartiallyPaid";
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return new(true, false, intent.OrderId);
+    }
+
+    public async Task<GatewayWebhookResponse> SimulateSandboxWebhookAsync(Guid ownerId, Guid orderId, bool success, string? responseCode, CancellationToken ct = default)
+    {
+        var cfg = options.Value;
+        if (cfg.Provider != "VnPaySandbox")
+            throw new BusinessException(400, "Chỉ hỗ trợ mô phỏng trên cổng VNPay Sandbox.");
+
+        var order = await db.Orders.SingleOrDefaultAsync(x => x.Id == orderId && x.CustomerId == ownerId, ct)
+            ?? throw new BusinessException(404, "Không tìm thấy đơn.");
+
+        var intent = await db.GatewayPaymentIntents
+            .Where(x => x.OrderId == orderId && (x.Status == "Accepted" || x.Status == "Pending" || x.Status == "Unknown"))
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .FirstOrDefaultAsync(ct);
+
+        if (intent is null)
+        {
+            var paidAmount = await PaidAsync(orderId, ct);
+            var remaining = order.TotalAmount - paidAmount;
+            if (remaining <= 0) throw new BusinessException(400, "Đơn hàng đã được thanh toán đủ.");
+
+            var suffix = Guid.NewGuid().ToString("N");
+            intent = new GatewayPaymentIntent
+            {
+                OrderId = order.Id,
+                OwnerId = ownerId,
+                ClientKey = "sim-" + Guid.NewGuid().ToString("N"),
+                Amount = remaining,
+                Currency = "VND",
+                ReturnUrlOrigin = "http://localhost:3000/thanh-toan/ket-qua",
+                ProviderKey = "intent:" + suffix,
+                Status = "Accepted",
+                TransactionCode = "I" + suffix
+            };
+            db.Add(intent);
+            await db.SaveChangesAsync(ct);
+        }
+
+        if (!success || responseCode == "24")
+        {
+            intent.Status = "Canceled";
+            intent.UpdatedAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return new GatewayWebhookResponse(true, false, order.Id);
+        }
+
+        var intentSuffix = intent.ProviderKey.StartsWith("intent:", StringComparison.Ordinal)
+            ? intent.ProviderKey["intent:".Length..]
+            : Guid.NewGuid().ToString("N");
+        var txnRef = "I" + intentSuffix;
+        intent.TransactionCode = txnRef;
+        await db.SaveChangesAsync(ct);
+
+        var amountInVnPayUnits = (decimal.ToInt64(intent.Amount) * 100).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var now = DateTime.UtcNow.AddHours(7).ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+        var randomTransNo = Random.Shared.Next(10000000, 99999999).ToString();
+
+        var parameters = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["vnp_Amount"] = amountInVnPayUnits,
+            ["vnp_BankCode"] = "NCB",
+            ["vnp_BankTranNo"] = "VNP" + now,
+            ["vnp_CardType"] = "ATM",
+            ["vnp_OrderInfo"] = "Thanh toan don hang " + order.Id.ToString("N"),
+            ["vnp_PayDate"] = now,
+            ["vnp_ResponseCode"] = "00",
+            ["vnp_TmnCode"] = cfg.VnPayTmnCode,
+            ["vnp_TransactionNo"] = randomTransNo,
+            ["vnp_TransactionStatus"] = "00",
+            ["vnp_TxnRef"] = txnRef
+        };
+
+        var sb = new StringBuilder();
+        foreach (var (k, v) in parameters)
+        {
+            if (sb.Length > 0) sb.Append('&');
+            sb.Append(System.Net.WebUtility.UrlEncode(k));
+            sb.Append('=');
+            sb.Append(System.Net.WebUtility.UrlEncode(v));
+        }
+
+        var keyBytes = Encoding.UTF8.GetBytes(cfg.VnPayHashSecret);
+        var dataBytes = Encoding.UTF8.GetBytes(sb.ToString());
+        var hashBytes = HMACSHA512.HashData(keyBytes, dataBytes);
+        var secureHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+
+        var raw = Encoding.UTF8.GetBytes(sb.ToString());
+        return await WebhookAsync(raw, secureHash, null, ct);
     }
 
     private async Task<decimal> PaidAsync(Guid orderId, CancellationToken ct) => (await db.Payments.Where(x => x.OrderId == orderId && x.PaymentStatus == "Paid").Select(x => x.Amount).ToListAsync(ct)).Sum();

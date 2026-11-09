@@ -197,7 +197,7 @@ public sealed class ShippingQuoteTests
         Assert.True(delivery.ShippingCost > 0);
 
         // Track delivery
-        var tracking = await commerce.TrackDeliveryAsync(order.Id, delivery.Id);
+        var tracking = await commerce.TrackDeliveryAsync(order.Id, delivery.Id, s.Customer.Id, false);
         Assert.True(tracking.Accepted);
         Assert.Equal(delivery.TrackingNumber, tracking.TrackingNumber);
 
