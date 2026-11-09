@@ -65,6 +65,9 @@ builder.Services.AddDbContext<HoaSapDbContext>(options =>
 });
 builder.Services.AddScoped<CommerceService>();
 builder.Services.AddScoped<WorkshopService>();
+builder.Services.AddSingleton(sp => { var o = new VnPayOptions(); builder.Configuration.GetSection("Payments:VnPay").Bind(o); return o; });
+builder.Services.AddHttpClient<VnPayClient>(client => client.DefaultRequestHeaders.UserAgent.ParseAdd("HoaSap/1.0")).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddScoped<VnPayBookingService>();
 builder.Services.AddScoped<RefundService>();
 builder.Services.AddScoped<CustomOrderService>();
 builder.Services.AddScoped<ShippingQuoteService>();
@@ -73,6 +76,7 @@ builder.Services.AddCommerceAdapters(
     o => builder.Configuration.GetSection("Payments:Gateway").Bind(o),
     o => builder.Configuration.GetSection("Shipping:Carrier").Bind(o));
 builder.Services.AddHostedService<BookingExpiryWorker>();
+builder.Services.AddHostedService<VnPayPollWorker>();
 builder.Services.AddHostedService<NotificationWorker>();
 builder.Services.AddHostedService<OrderExpiryWorker>();
 builder.Services.AddControllers().AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));

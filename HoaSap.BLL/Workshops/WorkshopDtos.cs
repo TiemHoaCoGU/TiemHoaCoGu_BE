@@ -13,3 +13,6 @@ public sealed record TicketScanDto(Guid BookingId, string BookingCode, string Cu
 public sealed class ManualPaymentRequest { [Required, MaxLength(100)] public string TransactionCode { get; set; } = ""; [Required] public string PaymentMethod { get; set; } = ""; [Range(0.01, 1000000000000d)] public decimal Amount { get; set; } }
 public sealed class ConfirmPaymentRequest { [Required, MaxLength(100)] public string TransactionCode { get; set; } = ""; }
 public sealed class RefundRequest { [Range(0.01, double.MaxValue)] public decimal Amount { get; set; } [Required, MaxLength(500)] public string Reason { get; set; } = ""; }
+public sealed record VnPayCheckoutDto(Guid BookingId, string TxnRef, int Amount, string PaymentUrl, DateTime ExpiresAtUtc);
+public sealed record VnPaySyncDto(string BookingStatus, decimal RemainingAmount, bool Paid, decimal AwaitingAmount, string LastResult);
+public sealed class VnPayReturnRequest { [Required] public string Query { get; set; } = ""; }

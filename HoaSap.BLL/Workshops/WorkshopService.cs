@@ -129,21 +129,28 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
 
     private async Task ExpirePendingBookingsCoreAsync(CancellationToken ct)
     {
-        var list = await db.WorkshopBookings.Where(x => x.BookingStatus == "pending" && x.HoldExpiresAt <= DateTime.UtcNow).ToListAsync(ct);
+        var now = DateTime.UtcNow;
+        var list = await db.WorkshopBookings.Where(x => x.BookingStatus == "pending" && x.HoldExpiresAt <= now).ToListAsync(ct);
+        var expired = new List<WorkshopBooking>();
         foreach (var b in list)
         {
+            if (b.HoldExpiresAt.AddMinutes(10) > now && await db.Payments.AnyAsync(x => x.BookingId == b.Id && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment", ct))
+                continue;
             var s = await db.WorkshopSessions.FirstOrDefaultAsync(s => s.Id == b.SessionId, ct);
             if (s is null) throw new BusinessException(409, "Booking tham chiếu ca học không tồn tại.");
             if (s.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hết hạn booking.");
             b.BookingStatus = "expired"; s.BookedSlots -= b.TicketCount; SetFullOrOpen(s);
+            expired.Add(b);
         }
-        if (list.Count > 0)
+        if (expired.Count > 0)
         {
-            var ids = list.Select(x => x.Id).ToList();
+            var ids = expired.Select(x => x.Id).ToList();
             var reports = await db.Payments.Where(x => x.BookingId != null && ids.Contains(x.BookingId.Value) && x.PaymentStatus == "PendingVerification").ToListAsync(ct);
             foreach (var report in reports) report.PaymentStatus = "Rejected";
+            var awaiting = await db.Payments.Where(x => x.BookingId != null && ids.Contains(x.BookingId.Value) && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment").ToListAsync(ct);
+            foreach (var p in awaiting) p.PaymentStatus = "Expired";
         }
-        await db.SaveChangesAsync(ct);
+        if (list.Count > 0 || expired.Count > 0) await db.SaveChangesAsync(ct);
     }
 
     public async Task<IReadOnlyList<BookingDto>> MyBookingsAsync(Guid customerId, CancellationToken ct = default) => await ToDtosAsync(await db.WorkshopBookings.AsNoTracking().Where(x => x.CustomerId == customerId).OrderByDescending(x => x.CreatedAt).ToListAsync(ct), ct);
@@ -431,7 +438,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (paid == 0 && DateTime.UtcNow >= SessionStartUtc(s).AddHours(-24) && amount < b.TotalAmount) throw new BusinessException(409, "Booking trong 24 giờ trước buổi học phải thanh toán đủ ngay lần đầu.");
         if (after > b.TotalAmount) throw new BusinessException(400, "Số tiền thanh toán vượt quá tổng booking.");
     }
-    private static void ApplyBookingPayment(WorkshopBooking b, decimal paid, decimal amount)
+    internal static void ApplyBookingPayment(WorkshopBooking b, decimal paid, decimal amount)
     {
         var after = paid + amount;
         b.RemainingAmount = Math.Max(0, b.TotalAmount - after);
