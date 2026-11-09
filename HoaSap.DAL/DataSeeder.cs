@@ -20,8 +20,8 @@ public static class DataSeeder
         {
             var category = await db.Categories.OrderBy(c => c.Code).FirstAsync(cancellationToken);
             db.Products.AddRange(
-                new Product { CategoryId = category.Id, Code = "HS-001", Name = "Bó hoa sáp thanh lịch", Price = 350000m, OriginalPrice = 400000m, Section = "arrivals", IsActive = true },
-                new Product { CategoryId = category.Id, Code = "HS-002", Name = "Bó hoa sáp pastel", Price = 420000m, Section = "discover", IsActive = true });
+                new Product { CategoryId = category.Id, Code = "HS-001", Name = "Bó hoa sáp thanh lịch", Price = 350000m, OriginalPrice = 400000m, Section = "arrivals", IsActive = true, ShippingWeightGrams = 500, PackageLengthCm = 30m, PackageWidthCm = 20m, PackageHeightCm = 15m, PackagingSpecsConfirmed = true },
+                new Product { CategoryId = category.Id, Code = "HS-002", Name = "Bó hoa sáp pastel", Price = 420000m, Section = "discover", IsActive = true, ShippingWeightGrams = 600, PackageLengthCm = 35m, PackageWidthCm = 25m, PackageHeightCm = 18m, PackagingSpecsConfirmed = true });
             await db.SaveChangesAsync(cancellationToken);
         }
         // Each seeded product is backed by an inventory row.

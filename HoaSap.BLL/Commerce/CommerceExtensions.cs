@@ -18,16 +18,29 @@ public class CommerceGatewayOptions
     public string MomoAccessKey { get; set; } = "";
     public string MomoSecretKey { get; set; } = "";
     public string MomoIpnUrl { get; set; } = "";
+    public string VnPayTmnCode { get; set; } = "";
+    public string VnPayHashSecret { get; set; } = "";
+    public string VnPayBaseUrl { get; set; } = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html";
+    public string VnPayApiUrl { get; set; } = "https://sandbox.vnpayment.vn/merchant_webapi/api/transaction";
     public int TimeoutSeconds { get; set; } = 15;
     public string[] AllowedReturnOrigins { get; set; } = [];
     public string[] ReturnUrlAllowlist { get => AllowedReturnOrigins; set => AllowedReturnOrigins = value ?? []; }
     public virtual void Validate()
     {
         if (Provider == "MomoSandbox") ValidateMomoSandbox();
+        else if (Provider == "VnPaySandbox") ValidateVnPaySandbox();
         else if (Provider == "GenericSignedGateway") ValidateTransport();
-        else throw new InvalidOperationException("Unsupported payment provider; only MoMo sandbox or the explicitly configured generic test adapter is allowed.");
-        if (AllowedReturnOrigins.Length == 0 || AllowedReturnOrigins.Any(x => !Uri.TryCreate(x, UriKind.Absolute, out var u) || u.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(u.PathAndQuery.Trim('/'))))
+        else throw new InvalidOperationException("Unsupported payment provider; only MoMo sandbox, VNPay sandbox or the explicitly configured generic test adapter is allowed.");
+        if (AllowedReturnOrigins.Length == 0 || AllowedReturnOrigins.Any(x => !Uri.TryCreate(x, UriKind.Absolute, out var u) || (!u.IsLoopback && u.Host != "localhost" && u.Scheme != Uri.UriSchemeHttps) || !string.IsNullOrEmpty(u.PathAndQuery.Trim('/'))))
             throw new InvalidOperationException("Commerce gateway return URL allowlist is required and must contain HTTPS origins only.");
+    }
+    private void ValidateVnPaySandbox()
+    {
+        if (string.IsNullOrWhiteSpace(VnPayTmnCode) || string.IsNullOrWhiteSpace(VnPayHashSecret))
+            throw new InvalidOperationException("VNPay sandbox is not configured; no payment request was sent.");
+        if (TimeoutSeconds is < 10 or > 120) throw new InvalidOperationException("VNPay API timeout must be between 10 and 120 seconds.");
+        if (!Uri.TryCreate(VnPayBaseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps || !uri.Host.EndsWith("vnpayment.vn", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("VNPay sandbox base URL must be an absolute HTTPS URL on vnpayment.vn.");
     }
     private void ValidateMomoSandbox()
     {
@@ -183,6 +196,7 @@ public static class CommerceServiceCollectionExtensions
             return options.Value.Provider switch
             {
                 "MomoSandbox" => new MomoSandboxPaymentGateway(http, options),
+                "VnPaySandbox" => new VnPaySandboxPaymentGateway(http, options),
                 "GenericSignedGateway" => new SignedHttpPaymentGateway(http, options),
                 _ => throw new InvalidOperationException("Unsupported payment provider; no request was sent.")
             };
