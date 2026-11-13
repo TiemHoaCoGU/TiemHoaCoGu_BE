@@ -205,6 +205,20 @@ namespace HoaSap.DAL.Migrations
                     b.Property<Guid>("CustomerId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int?>("DeliveryProvinceId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DeliveryProvinceName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int?>("DeliveryWardId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DeliveryWardName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<string>("Description")
                         .IsRequired()
                         .HasMaxLength(4000)
@@ -573,8 +587,22 @@ namespace HoaSap.DAL.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
 
+                    b.Property<int?>("ShippingProvinceId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ShippingProvinceName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<Guid?>("ShippingQuoteId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("ShippingWardId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ShippingWardName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<decimal>("SubTotal")
                         .HasPrecision(18, 2)
@@ -917,12 +945,26 @@ namespace HoaSap.DAL.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
+                    b.Property<int>("ProvinceId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("ProvinceName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<string>("TrackingNumber")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
                     b.Property<DateTime?>("UsedAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<int>("WardId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("WardName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<decimal>("Weight")
                         .HasPrecision(18, 3)

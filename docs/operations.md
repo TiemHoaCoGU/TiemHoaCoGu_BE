@@ -2,7 +2,7 @@
 
 ## Trước khi bán hàng thật
 
-Bản mở rộng có storefront `/shop/`, CMS `/admin/`, quy trình hoa đặt riêng và sổ thanh toán/hoàn tiền. MoMo adapter chỉ gọi endpoint sandbox cố định; Mailtrap Email Sandbox và Twilio Test Credentials bị khóa test-only. Không có giao dịch thật, SMS thật hay production deployment. GHN staging v3 address catalog đã được nối read-only; fee adapter mặc định `Disabled` vì GHN chưa công bố mapping báo phí có thể xác minh cho tỉnh/phường mới. Runtime từ chối generic/live carrier ngoài bộ test; không điền URL tùy ý rồi coi như tích hợp xong.
+Bản mở rộng có storefront `/shop/`, CMS `/admin/`, quy trình hoa đặt riêng và sổ thanh toán/hoàn tiền. MoMo adapter chỉ gọi endpoint sandbox cố định; Mailtrap Email Sandbox và Twilio Test Credentials bị khóa test-only. Không có giao dịch thật, SMS thật hay production deployment. GHN staging v3 address catalog đã được nối read-only; adapter báo phí dùng `POST /v2/shipping-order/preview` trên cùng gateway staging và đã được kiểm chứng end-to-end (provinces → wards → preview → create → detail → cancel) bằng tài khoản sandbox. Runtime từ chối generic/live carrier ngoài bộ test; không điền URL tùy ý rồi coi như tích hợp xong.
 
 Trạng thái hiện tại: MoMo M4B onboarding còn phụ thuộc bước kinh doanh/pháp lý của chủ tài khoản; không gửi attestation thay chủ. GHN staging Token/ShopId và địa chỉ kho đã có, secrets nằm ngoài repository; chưa có mapping phí chính thức cho địa bàn mới và hiện không có SKU nào có đủ cân nặng/kích thước được owner xác nhận. Mailtrap Email Sandbox đã được cấu hình riêng và nhận một email tổng hợp `.test`; Twilio Test Credentials chưa được cấp cho tài khoản hiện tại, không thay bằng trial/live SMS. Staging SQL Server, secrets manager/backup destination, ngưỡng tải/latency và dữ liệu seed tổng hợp vẫn cần hạ tầng/owner cung cấp. Tuyệt đối không dùng production/live credentials hay gửi giao dịch/tin nhắn thật.
 
@@ -29,21 +29,47 @@ Hoàn đơn: nhân viên tạo `/api/refunds/order/{orderId}`, Admin duyệt `/a
 
 ## Vận chuyển
 
-GHN staging đã được tích hợp đầy đủ cho tính phí, tạo vận đơn, hủy và tra cứu qua `dev-online-gateway.ghn.vn`. Hệ thống hỗ trợ chế độ GhnSandbox chuẩn biểu cước GHN, tính theo trọng lượng và kích thước kiện hàng quy đổi. Cấu hình mặc định `Shipping:Carrier:Provider=GhnSandbox`.
+GHN staging đã được tích hợp cho tính phí, tạo vận đơn, hủy và tra cứu qua `dev-online-gateway.ghn.vn` theo **danh mục địa chỉ 2 cấp** (tỉnh + phường; cấp huyện đã bị bỏ từ 01/07/2025). Báo phí dùng `POST /v2/shipping-order/preview` với `is_new_to_address=true`, `to_ward_name`, `to_province_name` (API `/v2/shipping-order/fee` vẫn đòi `to_district_id`/`to_ward_code` kiểu cũ nên không dùng được với danh mục mới). Tạo vận đơn dùng `POST /v2/shipping-order/create` với cùng bộ trường địa chỉ 2 cấp và `client_order_code` để retry không sinh trùng đơn. Cấu hình mặc định `Shipping:Carrier:Provider=GhnSandbox`.
 
 ```text
 Shipping__Carrier__Provider=GhnSandbox
+Shipping__Carrier__SandboxEmulation=false
 Shipping__GhnStaging__Token=<GHN staging token, secret manager/environment only>
-Shipping__GhnStaging__ShopId=<GHN staging shop ID>
+Shipping__GhnStaging__ShopId=<GHN staging shop ID, là "_id" trong GET /v2/shop/all, không phải client_id>
+Shipping__GhnStaging__FallbackCatalog=false
 ```
 
-`GET /api/shipping/locations/provinces` và `GET /api/shipping/locations/wards?provinceId=...` yêu cầu đăng nhập và chỉ proxy danh mục staging v3; không có API đặt đơn hoặc gọi phí trong client này. `POST /api/shipping/quote` nhận street address, province ID, ward ID và tùy chọn `items`; server đối chiếu tỉnh/phường cùng quan hệ cha-con với danh mục GHN hiện tại, rồi tự dựng tên địa chỉ chuẩn. Bỏ `items` để dùng giỏ tài khoản. Với mọi SKU trong giỏ, quote yêu cầu cân nặng kiện, cả ba kích thước dương và cờ Admin xác nhận; server không tin `weight` hoặc phí do khách gửi. Fingerprint chứa ID SKU, số lượng, cân nặng, kích thước và cờ xác nhận. Checkout kiểm tra lại thông số, quote còn hạn, chủ tài khoản, địa chỉ và fingerprint trước khi giữ kho; thiếu hoặc thay đổi thông số sẽ bị từ chối, không tạo đơn. Hiện GHN vẫn bị khóa vì chưa có mapping phí chính thức từ danh mục tỉnh/phường mới.
+Môi trường Development đọc Token/ShopId từ **user-secrets** của project `HoaSap.API` (đã khởi tạo `UserSecretsId`), nên token không nằm trong repository:
+
+```bash
+dotnet user-secrets set "Shipping:GhnStaging:Token" "<token>" --project HoaSap.API
+dotnet user-secrets set "Shipping:GhnStaging:ShopId" "<shop _id>" --project HoaSap.API
+dotnet user-secrets list --project HoaSap.API
+```
+
+Khi deploy thật thì thay bằng biến môi trường `Shipping__GhnStaging__*`. Thiếu Token/ShopId lúc khởi động, app dừng ngay với `InvalidOperationException` thay vì âm thầm chạy chế độ mô phỏng. `Shipping:Carrier:SenderWardName`/`SenderProvinceName` phải là tên **có trong danh mục v3 hiện tại** (ví dụ `Phường Thủ Đức` — `Phường Bến Nghé` đã sáp nhập vào `Phường Sài Gòn`), nếu không `create` trả `400 Fail when get place name of from ward code`.
+
+`GET /api/shipping/locations/provinces` và `GET /api/shipping/locations/wards?provinceId=...` yêu cầu đăng nhập và chỉ proxy danh mục staging v3; không có API đặt đơn hoặc gọi phí trong client này. `POST /api/shipping/quote` nhận street address, province ID, ward ID và tùy chọn `items`; server đối chiếu tỉnh/phường cùng quan hệ cha-con với danh mục GHN hiện tại, rồi tự dựng tên địa chỉ chuẩn. Bỏ `items` để dùng giỏ tài khoản. Với mọi SKU trong giỏ, quote yêu cầu cân nặng kiện, cả ba kích thước dương và cờ Admin xác nhận; server không tin `weight` hoặc phí do khách gửi. Fingerprint chứa ID SKU, số lượng, cân nặng, kích thước và cờ xác nhận. Checkout kiểm tra lại thông số, quote còn hạn, chủ tài khoản, địa chỉ và fingerprint trước khi giữ kho; thiếu hoặc thay đổi thông số sẽ bị từ chối, không tạo đơn. Mã/tên tỉnh–phường của GHN được lưu cùng quote và đơn để Staff tạo vận đơn không phải nhập lại. Ở chế độ thật (`SandboxEmulation=false`), GHN từ chối báo phí/tạo đơn thì API trả **502** kèm thông điệp GHN; hệ thống không tự thay bằng biểu cước nội bộ. Chỉ khi `SandboxEmulation=true` mới dùng biểu cước nội bộ và mã vận đơn mô phỏng cho demo offline. Đăng ký tài khoản GHN sandbox rồi lấy Token/ShopId theo hướng dẫn tại `developer.ghn.vn`; không dùng token production cho môi trường học tập. Form đặt riêng dùng cùng selector tỉnh/phường; đơn đặt riêng lưu mã/tên GHN như đơn thường nên Staff tạo được vận đơn. Yêu cầu đặt riêng (`POST /api/custom-orders`) nhận thêm `provinceId`/`wardId` tùy chọn, đối chiếu cùng danh mục GHN rồi lưu `DeliveryProvinceId/Name`, `DeliveryWardId/Name` trên `CustomOrderRequests`; gửi lẻ một trong hai hoặc phường không thuộc tỉnh sẽ bị **400**. Panel duyệt báo giá điền sẵn khu vực này khi mở form checkout để khách không phải chọn lại, nhưng vẫn sửa được.
 
 ### Nhập và xác nhận quy cách kiện cho SKU
 
 Trong CMS, mở **Sản phẩm → Sửa**, cân sản phẩm sau khi đã đóng gói như lúc giao khách (gram), đo kích thước ngoài của kiện theo chiều dài/rộng/cao (cm), rồi nhập cả bốn số. Chỉ chọn **xác nhận thông số thực tế** sau khi đã cân/đo; chiều dài/rộng/cao hỗ trợ tối đa hai chữ số thập phân. Thay đổi bất kỳ số đo nào tự bỏ xác nhận hiện tại; lưu thiếu số đo sẽ để trống, không điền giả.
 
-Các giá trị cũ, kể cả `500 g`, vẫn chưa được xác minh và không đủ điều kiện báo phí hoặc checkout. Migration không đánh dấu SKU cũ là đã xác nhận. Bảng sản phẩm Admin hiển thị trạng thái chưa xác nhận. CMS client cũ bỏ qua các field mới thì giữ nguyên giá trị cũ; chỉ request Admin gửi rõ `null` mới xóa chúng. Giá trị số học trong test là fixture tổng hợp, không dùng để điền dữ liệu cửa hàng. Khi admin xác nhận thông số đóng gói thật cho SKU, storefront có thể lấy báo giá GHN chính xác và checkout. Khi Staff tạo đợt giao hàng (`Delivery`), hệ thống tự động tạo vận đơn GHN, lấy mã tracking và hỗ trợ hủy hoặc tra cứu trạng thái. Để chuyển sang Production: cấu hình Token/ShopId thật từ khachhang.ghn.vn, đổi sang endpoint live và tắt SandboxEmulation.
+Các giá trị cũ, kể cả `500 g`, vẫn chưa được xác minh và không đủ điều kiện báo phí hoặc checkout. Migration không đánh dấu SKU cũ là đã xác nhận. Bảng sản phẩm Admin hiển thị trạng thái chưa xác nhận. CMS client cũ bỏ qua các field mới thì giữ nguyên giá trị cũ; chỉ request Admin gửi rõ `null` mới xóa chúng. Giá trị số học trong test là fixture tổng hợp, không dùng để điền dữ liệu cửa hàng. Khi admin xác nhận thông số đóng gói thật cho SKU, storefront có thể lấy báo giá GHN chính xác và checkout. Khi Staff tạo đợt giao hàng (`Delivery`), hệ thống tự động tạo vận đơn GHN, lấy mã tracking và hỗ trợ hủy hoặc tra cứu trạng thái. Vận đơn dùng **cùng mô hình đóng gói với báo giá** (tổng cân theo gram, chiều dài/rộng lấy max, chiều cao cộng dồn theo số kiện) để cân quy đổi `(D×R×C)/5000` khớp nhau; trước đây phần tạo vận đơn truyền `null` nên GHN chỉ tính cân thực và phí thực tế thấp hơn phí đã báo cho khách. Để chuyển sang Production: cấu hình Token/ShopId thật từ khachhang.ghn.vn, đổi sang endpoint live và tắt SandboxEmulation.
+
+### Quy trình giao hàng COD, thất bại, hoàn hàng và ghi nhận thanh toán
+
+Tại màn hình quản trị đơn hàng (`/quan-tri?view=orders`), một phiếu giao đi qua các trạng thái sau (chỉ chuyển được liền kề theo luật này; bước sai sẽ bị `409`):
+
+- `Đang chuẩn bị (Preparing)` → **Đã gửi (Shipped)** → **Đã giao (Delivered)** (giao thành công) hoặc **Giao thất bại (Failed)** → **Đã hoàn hàng (Returned)**.
+- Từ `Giao thất bại` có thể **Giao lại (Shipped)** hoặc **Hoàn hàng (Returned)**; `Hoàn hàng` là trạng thái cuối.
+- `Đang chuẩn bị` có thể **Hủy phiếu (Cancelled)**.
+
+COD thu hộ: số tiền thu hộ (`cod_amount`) được gửi lên GHN lúc tạo vận đơn bằng tổng tiền đơn khi đơn `Unpaid`, bằng `0` khi đơn đã thanh toán. Khi đơn `Unpaid` và mọi phiếu giao đều đã `Cancelled` hoặc `Returned`, đơn mới cho phép **Hủy đơn** (giải phóng kho đã giữ, hoàn lượt voucher). Đơn COD demo chuẩn: `Xác nhận → Đang chuẩn bị → (tạo phiếu giao, GHN trả mã) → Đang giao → Đã giao → Ghi nhận thanh toán (COD, tiền mặt hoặc chuyển khoản) → Hoàn tất`.
+
+Ghi nhận thanh toán: nút **Ghi nhận thanh toán** trong thẻ "Thanh toán" gọi `POST /api/payments/order/{id}` với `paymentMethod` ∈ {`Cash`, `BankTransfer`, `MoMo`}, `transactionCode` (dùng tránh ghi trùng) và `amount`. Sau khi ghi đủ tổng đơn, `PaymentStatus` chuyển `Paid` và đơn mới đủ điều kiện **Hoàn tất** (cần mọi sản phẩm đã giao). Nếu đơn đã thanh toán mà muốn hoàn, dùng luồng hoàn tiền (`refund`), không hủy trực tiếp.
+
+Tra cứu GHN: nút **Tra cứu GHN** trên mỗi phiếu gọi `GET /api/orders/{id}/deliveries/{deliveryId}/tracking`, trả về trạng thái hiện tại **và toàn bộ lịch sử** `log[]` từ GHN (ngày giờ từng bước, ghi chú nếu có), kèm `cod_amount`, `is_cod_collected` và `leadtime` (dự kiến giao). Thiếu `log[]` thì hệ thống vẫn hiện một dòng trạng thái thay vì để trống. Nếu adapter trả lỗi (token sai/hết hạn hay đơn không thuộc shop), panel hiện rõ thông điệp GHN kèm `accepted=false`, không giả lập dữ liệu. Chế độ `SandboxEmulation=true` thì tra cứu trả trạng thái cố định `delivering` vì không gọi GHN thật.
 
 ## Hết hạn và voucher
 

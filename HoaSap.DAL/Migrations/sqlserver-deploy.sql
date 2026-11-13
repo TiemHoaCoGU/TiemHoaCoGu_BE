@@ -1451,3 +1451,144 @@ GO
 
 COMMIT;
 GO
+
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [ShippingQuotes] ADD [ProvinceId] int NOT NULL DEFAULT 0;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [ShippingQuotes] ADD [ProvinceName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [ShippingQuotes] ADD [WardId] int NOT NULL DEFAULT 0;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [ShippingQuotes] ADD [WardName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [ShippingProvinceId] int NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [ShippingProvinceName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [ShippingWardId] int NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    ALTER TABLE [Orders] ADD [ShippingWardName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113043133_AddGhnTwoLevelAddress'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261113043133_AddGhnTwoLevelAddress', N'8.0.22');
+END;
+GO
+
+COMMIT;
+GO
+
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113051330_AddCustomRequestDeliveryArea'
+)
+BEGIN
+    ALTER TABLE [CustomOrderRequests] ADD [DeliveryProvinceId] int NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113051330_AddCustomRequestDeliveryArea'
+)
+BEGIN
+    ALTER TABLE [CustomOrderRequests] ADD [DeliveryProvinceName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113051330_AddCustomRequestDeliveryArea'
+)
+BEGIN
+    ALTER TABLE [CustomOrderRequests] ADD [DeliveryWardId] int NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113051330_AddCustomRequestDeliveryArea'
+)
+BEGIN
+    ALTER TABLE [CustomOrderRequests] ADD [DeliveryWardName] nvarchar(200) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113051330_AddCustomRequestDeliveryArea'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261113051330_AddCustomRequestDeliveryArea', N'8.0.22');
+END;
+GO
+
+COMMIT;
+GO
+
