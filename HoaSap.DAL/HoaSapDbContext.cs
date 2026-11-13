@@ -181,6 +181,8 @@ public class HoaSapDbContext : DbContext
         b.Entity<WorkshopSession>().HasIndex(x => new { x.WorkshopId, x.SessionDate, x.StartTime }).IsUnique();
 
         b.Entity<Order>().Property(x => x.IdempotencyKey).HasMaxLength(100);
+        b.Entity<Order>().Property(x => x.ShippingProvinceName).HasMaxLength(200);
+        b.Entity<Order>().Property(x => x.ShippingWardName).HasMaxLength(200);
         b.Entity<Order>().Property(x => x.RequestFingerprint).HasMaxLength(64);
         b.Entity<Order>().HasIndex(x => new { x.CustomerId, x.IdempotencyKey }).IsUnique()
             .HasFilter("[CustomerId] IS NOT NULL AND [IdempotencyKey] IS NOT NULL");

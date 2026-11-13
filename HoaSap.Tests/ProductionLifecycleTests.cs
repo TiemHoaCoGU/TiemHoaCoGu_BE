@@ -116,11 +116,75 @@ public sealed class ProductionLifecycleTests
     }
 
     [Fact]
+    public async Task FailedDeliveryCanBeRetriedThenReturnedAndTheItemBecomesShippableAgain()
+    {
+        var (f, admin) = await StartAsync(); using (f) using (admin)
+        {
+            var p = await ProductAsync(admin, 1); using var c = await UserAsync(f); var (order, item) = await OrderAsync(c, p);
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" }))).EnsureSuccessStatusCode();
+            var delivery = await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } }));
+            delivery.EnsureSuccessStatusCode(); using var dd = JsonDocument.Parse(await delivery.Content.ReadAsStringAsync()); var did = dd.RootElement.GetProperty("id").GetGuid();
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Delivering" }))).EnsureSuccessStatusCode();
+
+            var statusPath = $"/api/orders/{order}/deliveries/{did}/status";
+            Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync(statusPath, Json(new { status = "Shipped" }))).StatusCode);
+            // Delivery attempt fails, the shop retries, the retry fails again, then the parcel goes back.
+            foreach (var status in new[] { "Failed", "Shipped", "Failed", "Returned" })
+                Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync(statusPath, Json(new { status }))).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Completed" }))).StatusCode);
+
+            // Returned goods are physically back at the shop, so the same order item can be shipped again.
+            Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } }))).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task ReturnedDeliveryLetsAnUnpaidOrderBeCancelledAndReleasesStock()
+    {
+        var (f, admin) = await StartAsync(); using (f) using (admin)
+        {
+            var p = await ProductAsync(admin, 1); using var c = await UserAsync(f); var (order, item) = await OrderAsync(c, p);
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" }))).EnsureSuccessStatusCode();
+            var delivery = await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } }));
+            delivery.EnsureSuccessStatusCode(); using var dd = JsonDocument.Parse(await delivery.Content.ReadAsStringAsync()); var did = dd.RootElement.GetProperty("id").GetGuid();
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Delivering" }))).EnsureSuccessStatusCode();
+            Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/orders/{order}/deliveries/{did}/status", Json(new { status = "Shipped" }))).StatusCode);
+
+            // While the parcel is still with the carrier the order cannot be cancelled.
+            Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Cancelled" }))).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/orders/{order}/deliveries/{did}/status", Json(new { status = "Returned" }))).StatusCode);
+            Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Cancelled" }))).StatusCode);
+
+            using var s = f.Services.CreateScope(); var inv = await s.ServiceProvider.GetRequiredService<HoaSapDbContext>().Inventories.SingleAsync(x => x.ProductId == p);
+            Assert.Equal(1, inv.QuantityAvailable); Assert.Equal(0, inv.QuantityReserved);
+        }
+    }
+
+
+    [Fact]
     public async Task MaliciousDuplicateAndNonPositiveLinesAreBadRequest()
     {
         var (f, admin) = await StartAsync(); using (f) using (admin) { var p = await ProductAsync(admin, 3); using var c = await UserAsync(f);
             Assert.Equal(HttpStatusCode.BadRequest, (await c.PostAsync("/api/orders/checkout", Json(new { shippingAddress = "A", items = new[] { new { productId = p, quantity = 0 }, new { productId = p, quantity = -1 } } }))).StatusCode);
             var (order, item) = await OrderAsync(c, p); await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" })); Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 0 } } }))).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task ShipmentUsesTheSamePackagingModelAsTheQuote()
+    {
+        var (f, admin) = await StartAsync(); using (f) using (admin)
+        {
+            var p = await ProductAsync(admin, 3); using var c = await UserAsync(f); var (order, item) = await OrderAsync(c, p, quantity: 2);
+            Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" }))).StatusCode);
+            (await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 2 } } }))).EnsureSuccessStatusCode();
+            var shipment = f.LastShipment!;
+            Assert.Equal(1.0m, shipment.WeightKg);   // 2 x 500 g, the same product weight the quote priced
+            Assert.Equal(30, shipment.LengthCm);     // largest footprint of the parcel
+            Assert.Equal(20, shipment.WidthCm);
+            Assert.Equal(20, shipment.HeightCm);     // 2 boxes stacked, 10 cm each
+            Assert.Equal("Phường Thủ Đức", shipment.ToWardName);
+            Assert.Equal("Hồ Chí Minh", shipment.ToProvinceName);
         }
     }
 

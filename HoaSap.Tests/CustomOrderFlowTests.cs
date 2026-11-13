@@ -1,5 +1,8 @@
 using System.Net;
 using System.Text.Json;
+using HoaSap.DAL;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 namespace HoaSap.Tests;
 
@@ -218,5 +221,80 @@ public sealed class CustomOrderFlowTests(ApiFixture fixture) : ApiTestBase(fixtu
         foreach (var status in new[] { "Shipped", "Delivered" })
             (await flow.Admin.PostAsync($"/api/orders/{orderId}/deliveries/{deliveryId}/status", Json(new { status }))).EnsureSuccessStatusCode();
         Assert.True((await FindAsync(flow.Customer, id)).GetProperty("deliveryComplete").GetBoolean());
+    }
+
+    [Fact]
+    public async Task CheckoutWithGhnWardComposesTwoLevelAddressAndStoresCodes()
+    {
+        var flow = await SetupAsync();
+        var id = await RequestAsync(flow);
+        (await QuoteAsync(flow.Admin, id)).EnsureSuccessStatusCode();
+        (await flow.Customer.PostAsync($"/api/custom-orders/{id}/approve", Json(new { version = 1 }))).EnsureSuccessStatusCode();
+        var checkout = await flow.Customer.PostAsync($"/api/custom-orders/{id}/checkout", Json(new
+        {
+            shippingAddress = "12 Đường Hoa",
+            provinceId = 1000001,
+            wardId = 1003580,
+            idempotencyKey = "ghn-" + Guid.NewGuid().ToString("N")
+        }));
+        checkout.EnsureSuccessStatusCode();
+        using var created = JsonDocument.Parse(await checkout.Content.ReadAsStringAsync());
+        var orderId = created.RootElement.GetProperty("orderId").GetGuid();
+
+        using var scope = Fixture.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<HoaSapDbContext>();
+        var order = await db.Orders.SingleAsync(x => x.Id == orderId);
+        Assert.Equal(1000001, order.ShippingProvinceId);
+        Assert.Equal("Hồ Chí Minh", order.ShippingProvinceName);
+        Assert.Equal(1003580, order.ShippingWardId);
+        Assert.Equal("Phường Thủ Đức", order.ShippingWardName);
+        Assert.Contains("Address: 12 Đường Hoa, Phường Thủ Đức, Hồ Chí Minh", order.ShippingAddress);
+    }
+
+    [Fact]
+    public async Task RequestStoresGhnDeliveryAreaAndRejectsInvalidWard()
+    {
+        var flow = await SetupAsync();
+        var created = await flow.Customer.PostAsync("/api/custom-orders", Json(new
+        {
+            productId = flow.Product,
+            quantity = 1,
+            description = "Hoa giao khu vực Thủ Đức",
+            provinceId = 1000001,
+            wardId = 1003580
+        }));
+        created.EnsureSuccessStatusCode();
+        using var body = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var id = body.RootElement.GetProperty("id").GetGuid();
+        Assert.Equal(1000001, body.RootElement.GetProperty("deliveryProvinceId").GetInt32());
+        Assert.Equal("Hồ Chí Minh", body.RootElement.GetProperty("deliveryProvinceName").GetString());
+        Assert.Equal(1003580, body.RootElement.GetProperty("deliveryWardId").GetInt32());
+        Assert.Equal("Phường Thủ Đức", body.RootElement.GetProperty("deliveryWardName").GetString());
+
+        using var scope = Fixture.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<HoaSapDbContext>();
+        var stored = await db.Set<HoaSap.Domain.Entities.CustomOrderRequest>().SingleAsync(x => x.Id == id);
+        Assert.Equal(1003580, stored.DeliveryWardId);
+        Assert.Equal("Phường Thủ Đức", stored.DeliveryWardName);
+
+        var unknownWard = await flow.Customer.PostAsync("/api/custom-orders", Json(new
+        {
+            productId = flow.Product, quantity = 1, description = "Phường không tồn tại", provinceId = 1000001, wardId = 999999
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, unknownWard.StatusCode);
+
+        var provinceOnly = await flow.Customer.PostAsync("/api/custom-orders", Json(new
+        {
+            productId = flow.Product, quantity = 1, description = "Thiếu phường", provinceId = 1000001
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, provinceOnly.StatusCode);
+
+        var noArea = await flow.Customer.PostAsync("/api/custom-orders", Json(new
+        {
+            productId = flow.Product, quantity = 1, description = "Không chọn khu vực"
+        }));
+        noArea.EnsureSuccessStatusCode();
+        using var plain = JsonDocument.Parse(await noArea.Content.ReadAsStringAsync());
+        Assert.Equal(JsonValueKind.Null, plain.RootElement.GetProperty("deliveryProvinceId").ValueKind);
     }
 }

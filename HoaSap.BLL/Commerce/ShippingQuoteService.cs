@@ -44,17 +44,26 @@ public sealed class ShippingQuoteService(HoaSapDbContext db, ICarrierAdapter car
         var cfg = options.Value;
         var origin = cfg.Origin?.Trim() ?? "";
         if (origin.Length == 0) throw new BusinessException(503, "Chưa cấu hình địa chỉ kho gửi hàng.");
+        var customer = await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId, ct);
         CarrierRateResult result;
         var maxLength = snapshot.Max(x => (int)Math.Ceiling(x.PackageLengthCm ?? 10m));
         var maxWidth = snapshot.Max(x => (int)Math.Ceiling(x.PackageWidthCm ?? 10m));
         var totalHeight = snapshot.Sum(x => (int)Math.Ceiling((x.PackageHeightCm ?? 5m) * x.Quantity));
-        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight, request.ProvinceId, request.WardId);
+        var rateItems = groups.Select(x =>
+        {
+            var product = products[x.ProductId];
+            return new CarrierShipmentItem(product.Name, product.Code, x.Quantity, product.Price, product.ShippingWeightGrams ?? 500,
+                (int?)product.PackageLengthCm, (int?)product.PackageWidthCm, (int?)product.PackageHeightCm);
+        }).ToList();
+        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight, request.ProvinceId, request.WardId,
+            ToName: customer?.FullName, ToPhone: customer?.PhoneNumber, ToWardName: request.WardName.Trim(), ToProvinceName: request.ProvinceName.Trim(), Items: rateItems);
         try { result = await carrier.QuoteAsync(rateRequest, ct); }
-        catch (InvalidOperationException) when (carrier is DisabledCarrier) { throw new BusinessException(503, "Chưa có mapping phí GHN chính thức cho danh mục tỉnh/phường hiện tại; không tạo đơn."); }
-        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException) { throw new BusinessException(503, "Chưa lấy được báo giá nhà vận chuyển."); }
+        catch (InvalidOperationException) when (carrier is DisabledCarrier) { throw new BusinessException(503, "Nhà vận chuyển chưa được cấu hình; không tạo báo giá."); }
+        catch (InvalidOperationException ex) { throw new BusinessException(502, ex.Message); }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { throw new BusinessException(502, "Không kết nối được GHN staging; chưa tạo báo giá."); }
         if (!result.Accepted || result.Amount < 0 || result.Amount > 1_000_000_000m || decimal.Round(result.Amount, 2) != result.Amount) throw new BusinessException(400, "Nhà vận chuyển không cung cấp báo giá hợp lệ.");
         var lifetime = cfg.QuoteLifetimeMinutes is >= 1 and <= 1440 ? cfg.QuoteLifetimeMinutes : 15;
-        var quote = new ShippingQuote { CustomerId = customerId, Origin = origin, Destination = destination, Weight = weight, CartFingerprint = Fingerprint(snapshot), Amount = result.Amount, TrackingNumber = result.TrackingNumber, ExpiresAt = DateTime.UtcNow.AddMinutes(lifetime) };
+        var quote = new ShippingQuote { CustomerId = customerId, Origin = origin, Destination = destination, ProvinceId = request.ProvinceId, ProvinceName = request.ProvinceName.Trim(), WardId = request.WardId, WardName = request.WardName.Trim(), Weight = weight, CartFingerprint = Fingerprint(snapshot), Amount = result.Amount, TrackingNumber = result.TrackingNumber, ExpiresAt = DateTime.UtcNow.AddMinutes(lifetime) };
         db.Add(quote);
         await db.SaveChangesAsync(ct);
         return new(quote.Id, quote.Origin, quote.Destination, quote.Weight, quote.Amount, quote.ExpiresAt, quote.TrackingNumber);

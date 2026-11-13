@@ -9,6 +9,11 @@ public class CustomOrderRequest
     public int Quantity { get; set; } = 1;
     public string Description { get; set; } = "";
     public string ReferenceImageUrl { get; set; } = "";
+    /// <summary>Khu vực giao hoa khách chọn lúc gửi yêu cầu (danh mục GHN 2 cấp); dùng để báo phí và điền sẵn lúc checkout.</summary>
+    public int? DeliveryProvinceId { get; set; }
+    public string? DeliveryProvinceName { get; set; }
+    public int? DeliveryWardId { get; set; }
+    public string? DeliveryWardName { get; set; }
     public DateTime? RequestedCompletionDate { get; set; }
     public DateTime? ProductionStartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }

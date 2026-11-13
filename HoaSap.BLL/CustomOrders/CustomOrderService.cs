@@ -1,6 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.Data;
 using System.Text.RegularExpressions;
+using HoaSap.BLL.Commerce;
 using HoaSap.DAL;
 using HoaSap.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -8,7 +9,8 @@ using Microsoft.EntityFrameworkCore;
 namespace HoaSap.BLL.CustomOrders;
 
 public sealed record CustomRequestDto(Guid Id, Guid ProductId, int Quantity, string Description, string ReferenceImageUrl, DateTime? RequestedCompletionDate, string Status, DateTime CreatedAt,
-    string ProductName, DateTime UpdatedAt, int QuoteVersion, Guid? OrderId, string? OrderCode, bool DepositReady, bool FullyPaid, bool DeliveryComplete);
+    string ProductName, DateTime UpdatedAt, int QuoteVersion, Guid? OrderId, string? OrderCode, bool DepositReady, bool FullyPaid, bool DeliveryComplete,
+    int? DeliveryProvinceId = null, string? DeliveryProvinceName = null, int? DeliveryWardId = null, string? DeliveryWardName = null);
 public sealed record CustomQuoteRevisionDto(int Version, decimal? UnitPrice, decimal? TotalAmount, decimal? DepositAmount, decimal PaidAmount, decimal BalanceAmount, DateTime CompletionDate, DateTime ExpiresAt, string AdminNote, DateTime CreatedAt, string Status);
 public sealed record CustomQuoteDto(Guid Id, Guid RequestId, int CurrentRevision, string Status, DateTime? ExpiresAt, IReadOnlyList<CustomQuoteRevisionDto> Revisions, Guid? OrderId, decimal PaidAmount, decimal BalanceAmount);
 public sealed class CustomRequestInput
@@ -19,6 +21,9 @@ public sealed class CustomRequestInput
     [Url, MaxLength(2000)] public string? ReferenceImageUrl { get; set; }
     public DateTime? RequestedCompletionDate { get; set; }
     public int? QuoteVersion { get; set; }
+    /// <summary>Khu vực giao hoa theo danh mục GHN 2 cấp; bỏ trống nếu khách chưa muốn chọn.</summary>
+    [Range(1, int.MaxValue)] public int? ProvinceId { get; set; }
+    [Range(1, int.MaxValue)] public int? WardId { get; set; }
 }
 public sealed class CustomQuoteInput
 {
@@ -32,6 +37,8 @@ public sealed class CustomApproveInput { [Range(1, int.MaxValue)] public int Ver
 public sealed class CustomCheckoutInput
 {
     [Required, MaxLength(2000)] public string ShippingAddress { get; set; } = "";
+    [Range(1, int.MaxValue)] public int? ProvinceId { get; set; }
+    [Range(1, int.MaxValue)] public int? WardId { get; set; }
     [MaxLength(100)] public string? ReceiverName { get; set; }
     [MaxLength(20)] public string? ReceiverPhone { get; set; }
     [MaxLength(1000)] public string? Note { get; set; }
@@ -41,7 +48,7 @@ public sealed record CustomCheckoutDto(Guid OrderId, string OrderCode, int Quote
 public sealed record CustomLifecycleDto(Guid RequestId, Guid OrderId, string Status, DateTime? ScheduledCompletionDate, DateTime? ProductionStartedAt, DateTime? CompletedAt, decimal RequiredDeposit, decimal PaidAmount, decimal BalanceAmount, string DeliveryStatus);
 
 /// <summary>Made-to-order quotations do not reserve stock from the ready-made catalog.</summary>
-public sealed class CustomOrderService(HoaSapDbContext db)
+public sealed class CustomOrderService(HoaSapDbContext db, IGhnStagingAddressCatalog? addressCatalog = null)
 {
     private static readonly Regex PhonePattern = new(@"^[+0-9 ()\-]{9,20}$", RegexOptions.CultureInvariant);
     private static BusinessException Error(int code, string message) => new(code, message);
@@ -49,7 +56,7 @@ public sealed class CustomOrderService(HoaSapDbContext db)
 
     public async Task<CustomRequestDto> CreateAsync(Guid customerId, CustomRequestInput input, CancellationToken ct = default)
     {
-        await ValidateRequestAsync(input, ct);
+        var area = await ValidateRequestAsync(input, ct);
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var description = input.Description.Trim();
         var image = input.ReferenceImageUrl?.Trim() ?? "";
@@ -57,11 +64,13 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         var since = DateTime.UtcNow.AddMinutes(-10);
         var existing = await db.Set<CustomOrderRequest>().AsNoTracking()
             .Where(x => x.CustomerId == customerId && x.ProductId == input.ProductId && x.Quantity == input.Quantity && x.Description == description &&
-                        x.ReferenceImageUrl == image && x.RequestedCompletionDate == date && x.Status == "Requested" && x.CreatedAt >= since)
+                        x.ReferenceImageUrl == image && x.RequestedCompletionDate == date && x.Status == "Requested" && x.CreatedAt >= since &&
+                        x.DeliveryProvinceId == area.ProvinceId && x.DeliveryWardId == area.WardId)
             .OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync(ct);
         if (existing is not null) { await tx.CommitAsync(ct); return (await MapAsync([existing], ct))[0]; }
         var request = new CustomOrderRequest { CustomerId = customerId };
         Apply(request, input);
+        ApplyDeliveryArea(request, area);
         db.Add(request);
         db.Add(new CustomQuotation { CustomOrderRequestId = request.Id });
         await db.SaveChangesAsync(ct);
@@ -83,9 +92,10 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         if (await db.Set<CustomOrderCheckout>().AnyAsync(x => x.CustomQuotationId == quote.Id, ct) || request.Status is not ("Requested" or "Quoted" or "Approved"))
             throw Error(409, "Yêu cầu đã tạo đơn hoặc không thể sửa ở trạng thái hiện tại.");
         if (input.QuoteVersion is { } version && version != quote.CurrentRevision) throw Error(409, "Báo giá vừa thay đổi, vui lòng tải lại trước khi sửa.");
-        await ValidateRequestAsync(input, ct);
+        var area = await ValidateRequestAsync(input, ct);
         var wasQuoted = request.Status is "Quoted" or "Approved";
         Apply(request, input);
+        if (!area.IsEmpty) ApplyDeliveryArea(request, area);
         if (wasQuoted)
         {
             var current = await db.Set<CustomQuotationRevision>().SingleOrDefaultAsync(x => x.CustomQuotationId == quote.Id && x.Version == quote.CurrentRevision, ct);
@@ -192,7 +202,20 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         var customer = await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId, ct);
         var receiverName = string.IsNullOrWhiteSpace(input.ReceiverName) ? customer?.FullName ?? "" : input.ReceiverName.Trim();
         var receiverPhone = string.IsNullOrWhiteSpace(input.ReceiverPhone) ? customer?.PhoneNumber ?? "" : input.ReceiverPhone.Trim();
-        var address = $"ReceiverName: {receiverName}; ReceiverPhone: {receiverPhone}; ReceiverEmail: {customer?.Email ?? ""}; Address: {input.ShippingAddress.Trim()}";
+        var streetAddress = input.ShippingAddress.Trim();
+        int? provinceId = null; int? wardId = null; string? provinceName = null; string? wardName = null;
+        if (input.ProvinceId is not null || input.WardId is not null)
+        {
+            if (input.ProvinceId is not > 0 || input.WardId is not > 0) throw Error(400, "Chọn tỉnh và phường GHN hợp lệ.");
+            if (addressCatalog is null) throw Error(503, "Danh mục địa chỉ GHN chưa sẵn sàng.");
+            var province = (await addressCatalog.GetProvincesAsync(ct)).SingleOrDefault(x => x.Id == input.ProvinceId);
+            if (province is null) throw Error(400, "Tỉnh không thuộc danh mục GHN hiện tại.");
+            var ward = (await addressCatalog.GetWardsAsync(province.Id, ct)).SingleOrDefault(x => x.Id == input.WardId && x.ParentId == province.Id);
+            if (ward is null) throw Error(400, "Phường không thuộc tỉnh đã chọn trong danh mục GHN.");
+            provinceId = province.Id; provinceName = province.Name; wardId = ward.Id; wardName = ward.Name;
+        }
+        var fullAddress = wardName is null ? streetAddress : $"{streetAddress}, {wardName}, {provinceName}";
+        var address = $"ReceiverName: {receiverName}; ReceiverPhone: {receiverPhone}; ReceiverEmail: {customer?.Email ?? ""}; Address: {fullAddress}";
         var key = input.IdempotencyKey.Trim();
         var old = await db.Set<CustomOrderCheckout>().SingleOrDefaultAsync(x => x.CustomerId == customerId && x.IdempotencyKey == key, ct);
         if (old is not null)
@@ -210,7 +233,9 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         var created = new Order
         {
             CustomerId = customerId, OrderCode = $"CUS-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}", SubTotal = revision.TotalAmount, TotalAmount = revision.TotalAmount,
-            OrderStatus = "Confirmed", PaymentStatus = revision.TotalAmount == 0 ? "Paid" : "Unpaid", ShippingAddress = address, Note = input.Note?.Trim() ?? ""
+            OrderStatus = "Confirmed", PaymentStatus = revision.TotalAmount == 0 ? "Paid" : "Unpaid", ShippingAddress = address,
+            ShippingProvinceId = provinceId, ShippingProvinceName = provinceName, ShippingWardId = wardId, ShippingWardName = wardName,
+            Note = input.Note?.Trim() ?? ""
         };
         // The accepted quote is an all-inclusive price. Delivery is created by operations after production starts.
         created.Items.Add(new OrderItem { OrderId = created.Id, ProductId = request.ProductId, Quantity = request.Quantity, UnitPrice = revision.UnitPrice, FinalPrice = revision.UnitPrice, CustomNote = request.Description, ReferenceImageUrl = request.ReferenceImageUrl });
@@ -257,13 +282,39 @@ public sealed class CustomOrderService(HoaSapDbContext db)
         return ToLifecycle(context, "Completed", "Delivered");
     }
 
-    private async Task ValidateRequestAsync(CustomRequestInput input, CancellationToken ct)
+    private sealed record DeliveryArea(int? ProvinceId, string? ProvinceName, int? WardId, string? WardName)
+    {
+        public bool IsEmpty => ProvinceId is null && WardId is null;
+    }
+
+    private async Task<DeliveryArea> ValidateRequestAsync(CustomRequestInput input, CancellationToken ct)
     {
         if (input is null || input.Quantity is < 1 or > 1000 || string.IsNullOrWhiteSpace(input.Description) || input.Description.Length > 4000) throw Error(400, "Thông tin yêu cầu chưa hợp lệ.");
         var product = await db.Products.AsNoTracking().SingleOrDefaultAsync(x => x.Id == input.ProductId && x.IsActive, ct) ?? throw Error(404, "Không tìm thấy sản phẩm.");
         if (!product.IsCustomizable && !product.IsPreOrder) throw Error(400, "Sản phẩm không hỗ trợ tùy biến hoặc đặt trước.");
         if (input.RequestedCompletionDate is { } date && Utc(date) <= DateTime.UtcNow) throw Error(400, "Ngày mong muốn phải ở tương lai.");
+        return await ResolveDeliveryAreaAsync(input, ct);
     }
+
+    /// <summary>Đối chiếu khu vực giao với danh mục GHN hiện tại; bỏ trống cả hai thì trả về rỗng.</summary>
+    private async Task<DeliveryArea> ResolveDeliveryAreaAsync(CustomRequestInput input, CancellationToken ct)
+    {
+        if (input.ProvinceId is null && input.WardId is null) return new(null, null, null, null);
+        if (input.ProvinceId is not > 0 || input.WardId is not > 0) throw Error(400, "Chọn cả tỉnh và phường GHN hợp lệ.");
+        if (addressCatalog is null) throw Error(503, "Danh mục địa chỉ GHN chưa sẵn sàng.");
+        var province = (await addressCatalog.GetProvincesAsync(ct)).SingleOrDefault(x => x.Id == input.ProvinceId);
+        if (province is null) throw Error(400, "Tỉnh không thuộc danh mục GHN hiện tại.");
+        var ward = (await addressCatalog.GetWardsAsync(province.Id, ct)).SingleOrDefault(x => x.Id == input.WardId && x.ParentId == province.Id);
+        if (ward is null) throw Error(400, "Phường không thuộc tỉnh đã chọn trong danh mục GHN.");
+        return new(province.Id, province.Name, ward.Id, ward.Name);
+    }
+
+    private static void ApplyDeliveryArea(CustomOrderRequest request, DeliveryArea area)
+    {
+        request.DeliveryProvinceId = area.ProvinceId; request.DeliveryProvinceName = area.ProvinceName;
+        request.DeliveryWardId = area.WardId; request.DeliveryWardName = area.WardName;
+    }
+
     private static void Apply(CustomOrderRequest request, CustomRequestInput input)
     {
         request.ProductId = input.ProductId; request.Quantity = input.Quantity; request.Description = input.Description.Trim(); request.ReferenceImageUrl = input.ReferenceImageUrl?.Trim() ?? "";
@@ -346,7 +397,8 @@ public sealed class CustomOrderService(HoaSapDbContext db)
                 deliveryComplete = !items.Where(x => x.OrderId == checkout.OrderId).Any(x => delivered.GetValueOrDefault(x.Id) < x.Quantity);
             }
             return new CustomRequestDto(request.Id, request.ProductId, request.Quantity, request.Description, request.ReferenceImageUrl, request.RequestedCompletionDate, request.Status, request.CreatedAt,
-                names.GetValueOrDefault(request.ProductId) ?? "", request.UpdatedAt, quote?.CurrentRevision ?? 0, orderId, orderCode, depositReady, fullyPaid, deliveryComplete);
+                names.GetValueOrDefault(request.ProductId) ?? "", request.UpdatedAt, quote?.CurrentRevision ?? 0, orderId, orderCode, depositReady, fullyPaid, deliveryComplete,
+                request.DeliveryProvinceId, request.DeliveryProvinceName, request.DeliveryWardId, request.DeliveryWardName);
         }).ToList();
     }
 }

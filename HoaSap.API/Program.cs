@@ -26,6 +26,16 @@ if (!builder.Environment.IsEnvironment("Testing") && paymentProvider != "MomoSan
 var carrierProvider = builder.Configuration["Shipping:Carrier:Provider"] ?? "Disabled";
 if (!builder.Environment.IsEnvironment("Testing") && carrierProvider != "Disabled" && carrierProvider != "GhnSandbox" && carrierProvider != "GhnStaging")
     throw new InvalidOperationException("Carrier calls require a verified GHN staging adapter (GhnSandbox/GhnStaging); generic/live carrier endpoints are prohibited.");
+if (!builder.Environment.IsEnvironment("Testing") && (carrierProvider == "GhnSandbox" || carrierProvider == "GhnStaging") && !builder.Configuration.GetValue<bool>("Shipping:Carrier:SandboxEmulation"))
+{
+    var carrierToken = builder.Configuration["Shipping:Carrier:Token"] ?? builder.Configuration["Shipping:GhnStaging:Token"];
+    var carrierShopId = builder.Configuration.GetValue<int>("Shipping:Carrier:ShopId");
+    if (carrierShopId <= 0) carrierShopId = builder.Configuration.GetValue<int>("Shipping:GhnStaging:ShopId");
+    if (string.IsNullOrWhiteSpace(carrierToken) || carrierShopId <= 0)
+        throw new InvalidOperationException("GHN staging requires Token and ShopId when Shipping:Carrier:SandboxEmulation is false.");
+    if (builder.Configuration.GetValue<bool>("Shipping:GhnStaging:FallbackCatalog"))
+        throw new InvalidOperationException("Shipping:GhnStaging:FallbackCatalog must be false when SandboxEmulation is false; the fallback catalogue contains synthetic ward IDs.");
+}
 if (!isDev && (builder.Configuration.GetValue<bool>("Database:Initialize") || builder.Configuration.GetValue<bool>("Database:Seed")))
     throw new InvalidOperationException("Production requires reviewed database migrations; development initialization and seed must be disabled.");
 builder.WebHost.ConfigureKestrel(options =>
@@ -145,6 +155,8 @@ builder.Services.AddRateLimiter(o =>
         _ => new FixedWindowRateLimiterOptions { PermitLimit = authPermitLimit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 var app = builder.Build();
+if ((carrierProvider == "GhnSandbox" || carrierProvider == "GhnStaging") && app.Configuration.GetValue<bool>("Shipping:Carrier:SandboxEmulation"))
+    app.Logger.LogWarning("GHN SandboxEmulation=true: phí vận chuyển và mã vận đơn là dữ liệu mô phỏng, KHÔNG gửi lên GHN.");
 var forwardedHeaders = TrustedProxyConfiguration.CreateOptions(app.Configuration);
 app.UseForwardedHeaders(forwardedHeaders);
 app.UseMiddleware<RequestDiagnosticsMiddleware>();

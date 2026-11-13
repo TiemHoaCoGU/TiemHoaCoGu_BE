@@ -45,15 +45,30 @@ public sealed class ApiFixture : WebApplicationFactory<Program>
         }));
         builder.ConfigureTestServices(services =>
         {
-            services.AddSingleton<ICarrierAdapter, SyntheticQaCarrier>();
+            services.AddSingleton<ICarrierAdapter>(new SyntheticQaCarrier(this));
             services.AddSingleton<IGhnStagingAddressCatalog, SyntheticQaAddressCatalog>();
         });
     }
 
-    private sealed class SyntheticQaCarrier : ICarrierAdapter
+    /// <summary>Last shipment handed to the carrier, so tests can assert the outbound payload.</summary>
+    public CarrierShipmentRequest? LastShipment { get; internal set; }
+
+    private sealed class SyntheticQaCarrier(ApiFixture owner) : ICarrierAdapter
     {
         public Task<CarrierRateResult> QuoteAsync(CarrierRateRequest request, CancellationToken ct = default) =>
             Task.FromResult(new CarrierRateResult(true, 42000m, null, null));
+
+        public Task<CarrierShipmentResult> CreateShipmentAsync(CarrierShipmentRequest request, CancellationToken ct = default)
+        {
+            owner.LastShipment = request;
+            return Task.FromResult(new CarrierShipmentResult(true, $"QA-{request.DeliveryCode}", 42000m, DateTime.UtcNow.AddDays(2), "ready_to_pick", null));
+        }
+
+        public Task<CarrierCancelResult> CancelShipmentAsync(string trackingNumber, CancellationToken ct = default) =>
+            Task.FromResult(new CarrierCancelResult(true, "QA carrier cancelled the shipment.", null));
+
+        public Task<CarrierTrackingResult> TrackShipmentAsync(string trackingNumber, CancellationToken ct = default) =>
+            Task.FromResult(new CarrierTrackingResult(true, trackingNumber, "delivering", "Đang giao hàng (QA)", DateTime.UtcNow, null));
     }
 
     private sealed class SyntheticQaAddressCatalog : IGhnStagingAddressCatalog
@@ -79,9 +94,16 @@ public sealed class ApiFixture : WebApplicationFactory<Program>
 [CollectionDefinition("api", DisableParallelization = true)]
 public sealed class ApiCollection : ICollectionFixture<ApiFixture> { }
 
-public abstract class ApiTestBase(ApiFixture fixture)
+public abstract class ApiTestBase
 {
-    protected readonly HttpClient Client = fixture.CreateClient();
+    protected readonly HttpClient Client;
+    protected ApiFixture Fixture { get; }
+
+    protected ApiTestBase(ApiFixture fixture)
+    {
+        Fixture = fixture;
+        Client = fixture.CreateClient();
+    }
 
     protected static StringContent Json(object value) => new(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json");
 
@@ -110,20 +132,20 @@ public abstract class ApiTestBase(ApiFixture fixture)
         return document.RootElement.GetProperty("accessToken").GetString()!;
     }
 
-    protected async Task<HttpClient> AuthenticatedAsync(string token)
+    protected Task<HttpClient> AuthenticatedAsync(string token)
     {
-        var client = fixture.CreateClient();
+        var client = Fixture.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return client;
+        return Task.FromResult(client);
     }
 
     protected async Task<string> AdminTokenAsync()
     {
-        if (fixture.CachedAdminToken is { } cached) return cached;
+        if (Fixture.CachedAdminToken is { } cached) return cached;
         var response = await Client.PostAsync("/api/auth/login", Json(new { email = ApiFixture.AdminEmail, password = ApiFixture.AdminPassword }));
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        fixture.CachedAdminToken = document.RootElement.GetProperty("accessToken").GetString()!;
-        return fixture.CachedAdminToken;
+        Fixture.CachedAdminToken = document.RootElement.GetProperty("accessToken").GetString()!;
+        return Fixture.CachedAdminToken;
     }
 }

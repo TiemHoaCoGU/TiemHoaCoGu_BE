@@ -8,6 +8,7 @@ public sealed class CustomOrderRequestConfiguration : IEntityTypeConfiguration<C
     {
         b.ToTable("CustomOrderRequests", t => t.HasCheckConstraint("CK_CustomRequest_Quantity", "Quantity > 0"));
         b.HasKey(x => x.Id); b.Property(x => x.Description).HasMaxLength(4000).IsRequired(); b.Property(x => x.ReferenceImageUrl).HasMaxLength(2000); b.Property(x => x.ConcurrencyToken).IsConcurrencyToken();
+        b.Property(x => x.DeliveryProvinceName).HasMaxLength(200); b.Property(x => x.DeliveryWardName).HasMaxLength(200);
         b.Property(x => x.Status).HasMaxLength(40).IsRequired(); b.HasIndex(x => new { x.CustomerId, x.CreatedAt });
     }
 }

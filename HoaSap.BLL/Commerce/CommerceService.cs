@@ -175,6 +175,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         var quoteId = request.ShippingQuoteId.Value;
         var shippingQuote = await db.ShippingQuotes.SingleOrDefaultAsync(x => x.Id == quoteId, ct) ?? throw Bad("Báo giá vận chuyển không hợp lệ");
         if (shippingQuote.CustomerId != customerId.Value || shippingQuote.Destination != request.ShippingAddress.Trim() || shippingQuote.ExpiresAt <= DateTime.UtcNow || shippingQuote.UsedAt is not null || shippingQuote.OrderId is not null) throw Conflict("Báo giá vận chuyển không hợp lệ hoặc đã hết hạn");
+        if (shippingQuote.ProvinceId <= 0 || string.IsNullOrWhiteSpace(shippingQuote.ProvinceName) || shippingQuote.WardId <= 0 || string.IsNullOrWhiteSpace(shippingQuote.WardName)) throw Conflict("Báo giá thiếu địa chỉ GHN 2 cấp; vui lòng lấy lại báo giá vận chuyển");
         var shippingFee = shippingQuote.Amount;
         // Re-check inside the serializable transaction to close the race between pre-check and insert.
         if (key is not null)
@@ -228,7 +229,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         }
         var customer = customerId is { } buyerId ? await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == buyerId, ct) : null;
         var address = $"ReceiverName: {(request.ReceiverName ?? customer?.FullName ?? "")}; ReceiverPhone: {(request.ReceiverPhone ?? customer?.PhoneNumber ?? "")}; ReceiverEmail: {(request.ReceiverEmail ?? customer?.Email ?? "")}; Address: {request.ShippingAddress.Trim()}";
-        var order = new Order { Id = Guid.NewGuid(), CustomerId = customerId, IdempotencyKey = key, RequestFingerprint = fingerprint, VoucherId = voucher?.Id, OrderCode = $"ORD-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}", SubTotal = subtotal, DiscountAmount = discount, ShippingFee = shippingFee, TotalAmount = subtotal - discount + shippingFee, ShippingQuoteId = shippingQuote?.Id, OrderStatus = "Confirmed", PaymentStatus = "Unpaid", ShippingAddress = address, Note = request.Note ?? "", CreatedAt = DateTime.UtcNow };
+        var order = new Order { Id = Guid.NewGuid(), CustomerId = customerId, IdempotencyKey = key, RequestFingerprint = fingerprint, VoucherId = voucher?.Id, OrderCode = $"ORD-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}", SubTotal = subtotal, DiscountAmount = discount, ShippingFee = shippingFee, TotalAmount = subtotal - discount + shippingFee, ShippingQuoteId = shippingQuote.Id, OrderStatus = "Confirmed", PaymentStatus = "Unpaid", ShippingAddress = address, ShippingProvinceId = shippingQuote.ProvinceId, ShippingProvinceName = shippingQuote.ProvinceName, ShippingWardId = shippingQuote.WardId, ShippingWardName = shippingQuote.WardName, Note = request.Note ?? "", CreatedAt = DateTime.UtcNow };
         foreach (var line in lines) { var product = products[line.ProductId]; order.Items.Add(new OrderItem { Id = Guid.NewGuid(), OrderId = order.Id, ProductId = product.Id, Quantity = line.Quantity, UnitPrice = product.Price, FinalPrice = product.Price, CustomNote = line.Note ?? "", ReferenceImageUrl = line.Image ?? "" }); }
         shippingQuote.UsedAt = DateTime.UtcNow; shippingQuote.OrderId = order.Id;
         db.Orders.Add(order);
@@ -269,7 +270,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         if (order.OrderStatus is "Cancelled" or "Expired") return;
         if (order.PaymentStatus != "Unpaid") throw Conflict("Đơn đã có khoản thanh toán; cần quy trình hoàn tiền trước khi hủy");
         if (order.OrderStatus is "Delivering" or "Completed") throw Conflict("Đơn đã giao, không thể hủy");
-        if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled", ct)) throw Conflict("Đơn có giao hàng đang xử lý, không thể hủy");
+        if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled" && x.DeliveryStatus != "Returned", ct)) throw Conflict("Đơn có giao hàng đang xử lý, không thể hủy");
         if (!await IsCustomOrderAsync(order.Id, ct)) await ReleaseReservedAsync(order.Items, ct); await RestoreVoucherAsync(order, ct); order.OrderStatus = "Cancelled"; await SetCustomStatusAsync(order.Id, "Cancelled", ct); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
     }
 
@@ -302,7 +303,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         status = status?.Trim() ?? ""; await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var order = await db.Orders.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == orderId, ct) ?? throw NF("Không tìm thấy đơn");
         if (order.OrderStatus == status) { await transaction.RollbackAsync(ct); return; }
-        if (status == "Cancelled") { if (order.PaymentStatus != "Unpaid" || order.OrderStatus is not ("Confirmed" or "Processing")) throw Conflict("Chuyển trạng thái không hợp lệ"); if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled", ct)) throw Conflict("Đơn có giao hàng đang xử lý, không thể hủy"); if (!await IsCustomOrderAsync(order.Id, ct)) await ReleaseReservedAsync(order.Items, ct); await RestoreVoucherAsync(order, ct); }
+        if (status == "Cancelled") { if (order.PaymentStatus != "Unpaid" || order.OrderStatus is not ("Confirmed" or "Processing" or "Delivering")) throw Conflict("Chuyển trạng thái không hợp lệ"); if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled" && x.DeliveryStatus != "Returned", ct)) throw Conflict("Đơn còn phiếu giao đang xử lý, không thể hủy"); if (!await IsCustomOrderAsync(order.Id, ct)) await ReleaseReservedAsync(order.Items, ct); await RestoreVoucherAsync(order, ct); }
         else if ((order.OrderStatus, status) is not ("Confirmed", "Processing") and not ("Processing", "Delivering") and not ("Delivering", "Completed")) throw Conflict("Chuyển trạng thái không hợp lệ");
         if (status == "Processing" && await IsCustomOrderAsync(order.Id, ct))
         {
@@ -348,7 +349,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
             grouped.Add(new DeliveryLineRequest { OrderItemId = group.Key, Quantity = (int)quantity });
         }
         var delivery = new Delivery { Id = Guid.NewGuid(), OrderId = orderId, DeliveryCode = $"DEL-{Guid.NewGuid():N}", ShipperUnit = request.ShipperUnit ?? "", TrackingNumber = request.TrackingNumber ?? "", DeliveryStatus = "Preparing" };
-        foreach (var requested in grouped) { var line = order.Items.SingleOrDefault(i => i.Id == requested.OrderItemId) ?? throw Bad("OrderItem không thuộc đơn"); var used = await db.DeliveryItems.Where(y => y.OrderItemId == line.Id).Where(y => db.Deliveries.Any(d => d.Id == y.DeliveryId && d.DeliveryStatus != "Cancelled")).SumAsync(y => (int?)y.ShippedQuantity, ct) ?? 0; if (requested.Quantity > line.Quantity - used) throw Conflict("Vượt quá lượng chưa giao"); delivery.Items.Add(new DeliveryItem { Id = Guid.NewGuid(), DeliveryId = delivery.Id, OrderItemId = line.Id, ShippedQuantity = requested.Quantity }); }
+        foreach (var requested in grouped) { var line = order.Items.SingleOrDefault(i => i.Id == requested.OrderItemId) ?? throw Bad("OrderItem không thuộc đơn"); var used = await db.DeliveryItems.Where(y => y.OrderItemId == line.Id).Where(y => db.Deliveries.Any(d => d.Id == y.DeliveryId && d.DeliveryStatus != "Cancelled" && d.DeliveryStatus != "Returned")).SumAsync(y => (int?)y.ShippedQuantity, ct) ?? 0; if (requested.Quantity > line.Quantity - used) throw Conflict("Vượt quá lượng chưa giao"); delivery.Items.Add(new DeliveryItem { Id = Guid.NewGuid(), DeliveryId = delivery.Id, OrderItemId = line.Id, ShippedQuantity = requested.Quantity }); }
         if (string.IsNullOrWhiteSpace(delivery.TrackingNumber) && carrier is not null and not DisabledCarrier)
         {
             try
@@ -369,6 +370,9 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
                 var products = await db.Products.AsNoTracking().Where(p => productIds.Contains(p.Id)).ToDictionaryAsync(p => p.Id, ct);
                 var shipmentItems = new List<CarrierShipmentItem>();
                 var totalGrams = 0;
+                var maxLengthCm = 0;
+                var maxWidthCm = 0;
+                var totalHeightCm = 0;
                 foreach (var req in grouped)
                 {
                     var oi = orderItems.FirstOrDefault(x => x.Id == req.OrderItemId);
@@ -376,19 +380,24 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
                     {
                         var itemWeight = (prod.ShippingWeightGrams ?? 500) * req.Quantity;
                         totalGrams += itemWeight;
+                        // Same packaging model as ShippingQuoteService: largest footprint, stacked heights.
+                        maxLengthCm = Math.Max(maxLengthCm, (int)Math.Ceiling(prod.PackageLengthCm ?? 10m));
+                        maxWidthCm = Math.Max(maxWidthCm, (int)Math.Ceiling(prod.PackageWidthCm ?? 10m));
+                        totalHeightCm += (int)Math.Ceiling((prod.PackageHeightCm ?? 5m) * req.Quantity);
                         shipmentItems.Add(new CarrierShipmentItem(prod.Name, prod.Code, req.Quantity, oi.UnitPrice, prod.ShippingWeightGrams ?? 500, (int?)prod.PackageLengthCm, (int?)prod.PackageWidthCm, (int?)prod.PackageHeightCm));
                     }
                 }
                 var shipWeightKg = Math.Max(0.1m, totalGrams / 1000m);
-                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, null, null, shipWeightKg, null, null, null, 0, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems), ct);
-                if (shipRes.Accepted && !string.IsNullOrWhiteSpace(shipRes.TrackingNumber))
-                {
-                    delivery.TrackingNumber = shipRes.TrackingNumber;
-                    if (string.IsNullOrWhiteSpace(delivery.ShipperUnit)) delivery.ShipperUnit = "GHN";
-                    delivery.ShippingCost = shipRes.ShippingFee;
-                }
+                var codAmount = order.PaymentStatus == "Paid" ? 0m : delivery.Items.Sum(x => (orderItems.FirstOrDefault(i => i.Id == x.OrderItemId)?.FinalPrice ?? 0m) * x.ShippedQuantity);
+                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, null, null, shipWeightKg, Math.Max(1, maxLengthCm), Math.Max(1, maxWidthCm), Math.Max(1, totalHeightCm), codAmount, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems, order.ShippingWardName, order.ShippingProvinceName), ct);
+                if (!shipRes.Accepted || string.IsNullOrWhiteSpace(shipRes.TrackingNumber))
+                    throw new BusinessException(502, shipRes.ErrorMessage ?? "GHN không trả về mã vận đơn; chưa tạo phiếu giao.");
+                delivery.TrackingNumber = shipRes.TrackingNumber;
+                if (string.IsNullOrWhiteSpace(delivery.ShipperUnit)) delivery.ShipperUnit = "GHN";
+                delivery.ShippingCost = shipRes.ShippingFee;
             }
-            catch (Exception) { /* Non-blocking carrier shipment creation */ }
+            catch (BusinessException) { throw; }
+            catch (Exception ex) { throw new BusinessException(502, $"Không tạo được vận đơn GHN: {ex.Message}"); }
         }
         db.Deliveries.Add(delivery); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct); return ToDto(delivery);
     }
@@ -397,7 +406,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
     {
         status = status?.Trim() ?? ""; await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct); var delivery = await db.Deliveries.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == deliveryId && x.OrderId == orderId, ct) ?? throw NF("Không tìm thấy giao hàng");
         if (delivery.DeliveryStatus == status) { await tx.RollbackAsync(ct); return ToDto(delivery); }
-        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Preparing", "Cancelled")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
+        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Shipped", "Failed") and not ("Failed", "Shipped") and not ("Shipped", "Returned") and not ("Failed", "Returned") and not ("Preparing", "Cancelled")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
         delivery.DeliveryStatus = status; if (status == "Shipped") delivery.ShippedAt ??= DateTime.UtcNow; if (status == "Delivered") delivery.DeliveredAt ??= DateTime.UtcNow;
         if (status == "Cancelled" && !string.IsNullOrWhiteSpace(delivery.TrackingNumber) && carrier is not null and not DisabledCarrier)
         {
@@ -451,7 +460,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
             throw Conflict("Không thể hoàn lại lượt sử dụng voucher");
         // Keep VoucherId for immutable commercial history; the terminal status is the restoration marker.
     }
-    async Task<Dictionary<Guid, int>> ShippedQuantitiesAsync(IEnumerable<Guid> ids, CancellationToken ct) => await db.DeliveryItems.Where(x => ids.Contains(x.OrderItemId)).Where(x => db.Deliveries.Any(d => d.Id == x.DeliveryId && d.DeliveryStatus != "Cancelled")).GroupBy(x => x.OrderItemId).Select(g => new { g.Key, Quantity = g.Sum(x => x.ShippedQuantity) }).ToDictionaryAsync(x => x.Key, x => x.Quantity, ct);
+    async Task<Dictionary<Guid, int>> ShippedQuantitiesAsync(IEnumerable<Guid> ids, CancellationToken ct) => await db.DeliveryItems.Where(x => ids.Contains(x.OrderItemId)).Where(x => db.Deliveries.Any(d => d.Id == x.DeliveryId && d.DeliveryStatus != "Cancelled" && d.DeliveryStatus != "Returned")).GroupBy(x => x.OrderItemId).Select(g => new { g.Key, Quantity = g.Sum(x => x.ShippedQuantity) }).ToDictionaryAsync(x => x.Key, x => x.Quantity, ct);
     async Task<Dictionary<Guid, int>> DeliveredQuantitiesAsync(IEnumerable<Guid> ids, CancellationToken ct) => await db.DeliveryItems.Where(x => ids.Contains(x.OrderItemId)).Where(x => db.Deliveries.Any(d => d.Id == x.DeliveryId && d.DeliveryStatus == "Delivered")).GroupBy(x => x.OrderItemId).Select(g => new { g.Key, Quantity = g.Sum(x => x.ShippedQuantity) }).ToDictionaryAsync(x => x.Key, x => x.Quantity, ct);
     static string Fingerprint(Guid? customerId, CheckoutRequest r) { var canonical = new { customerId, r.ShippingAddress, r.ReceiverName, r.ReceiverPhone, r.ReceiverEmail, r.Note, r.VoucherCode, r.ShippingQuoteId, Items = (r.Items ?? []).Select(x => new { x.ProductId, x.Quantity, x.CustomNote, x.ReferenceImageUrl }).ToList() }; return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(canonical)))); }
     static OrderDto Map(Order order, IReadOnlyDictionary<Guid, int>? shipped = null) => new(order.Id, order.OrderCode, order.SubTotal, order.DiscountAmount, order.ShippingFee, order.TotalAmount, order.OrderStatus, order.PaymentStatus, order.ShippingAddress, order.CreatedAt, order.Items.Select(i => new OrderLineDto(i.Id, i.ProductId, i.Quantity, i.UnitPrice, i.FinalPrice, shipped is not null && shipped.TryGetValue(i.Id, out var quantity) ? quantity : 0, i.CustomNote, i.ReferenceImageUrl)).ToList());
