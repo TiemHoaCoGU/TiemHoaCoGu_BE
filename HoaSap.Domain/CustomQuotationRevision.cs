@@ -13,6 +13,7 @@ public class CustomQuotationRevision
     public DateTime ExpiresAt { get; set; }
     public Guid CreatedBy { get; set; }
     public string AdminNote { get; set; } = "";
+    public string? BouquetSnapshot { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string Status { get; set; } = "Sent";
 }

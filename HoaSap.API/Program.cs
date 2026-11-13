@@ -81,6 +81,7 @@ builder.Services.AddHttpClient<VnPayClient>(client => client.DefaultRequestHeade
 builder.Services.AddScoped<VnPayBookingService>();
 builder.Services.AddScoped<RefundService>();
 builder.Services.AddScoped<CustomOrderService>();
+builder.Services.Configure<BouquetCatalog>(builder.Configuration.GetSection("Bouquet"));
 builder.Services.AddScoped<ShippingQuoteService>();
 builder.Services.AddScoped<GatewayReconciliationService>();
 builder.Services.AddCommerceAdapters(

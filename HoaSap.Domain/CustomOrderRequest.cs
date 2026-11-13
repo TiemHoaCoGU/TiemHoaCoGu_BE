@@ -8,6 +8,7 @@ public class CustomOrderRequest
     public Guid ProductId { get; set; }
     public int Quantity { get; set; } = 1;
     public string Description { get; set; } = "";
+    public string? BouquetSnapshot { get; set; }
     public string ReferenceImageUrl { get; set; } = "";
     /// <summary>Khu vực giao hoa khách chọn lúc gửi yêu cầu (danh mục GHN 2 cấp); dùng để báo phí và điền sẵn lúc checkout.</summary>
     public int? DeliveryProvinceId { get; set; }

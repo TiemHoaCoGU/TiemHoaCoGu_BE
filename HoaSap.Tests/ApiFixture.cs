@@ -41,7 +41,24 @@ public sealed class ApiFixture : WebApplicationFactory<Program>
             ["BootstrapAdmin:Password"] = AdminPassword,
             ["BootstrapAdmin:PhoneNumber"] = "0900000001",
             ["BootstrapAdmin:FullName"] = "QA Admin",
-            ["Shipping:Carrier:Origin"] = "Synthetic QA warehouse"
+            ["Shipping:Carrier:Origin"] = "Synthetic QA warehouse",
+            ["Bouquet:MinFlowers"] = "7",
+            ["Bouquet:MaxStems"] = "20",
+            ["Bouquet:LaborPrice"] = "20000",
+            ["Bouquet:Items:0:Id"] = "rose",
+            ["Bouquet:Items:0:Name"] = "Hồng sáp",
+            ["Bouquet:Items:0:Color"] = "Hồng",
+            ["Bouquet:Items:0:Category"] = "flowers",
+            ["Bouquet:Items:0:Art"] = "rose",
+            ["Bouquet:Items:0:Price"] = "18000",
+            ["Bouquet:Items:1:Id"] = "leaf",
+            ["Bouquet:Items:1:Name"] = "Lá bạc",
+            ["Bouquet:Items:1:Category"] = "greenery",
+            ["Bouquet:Items:1:Art"] = "eucalyptus",
+            ["Bouquet:Items:1:Price"] = "3000",
+            ["Bouquet:Wraps:0:Id"] = "classic",
+            ["Bouquet:Wraps:0:Name"] = "Giấy gói cổ điển",
+            ["Bouquet:Wraps:0:Price"] = "0"
         }));
         builder.ConfigureTestServices(services =>
         {

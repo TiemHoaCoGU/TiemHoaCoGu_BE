@@ -1592,3 +1592,37 @@ GO
 COMMIT;
 GO
 
+BEGIN TRANSACTION;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113102019_AddCustomBouquetSnapshots'
+)
+BEGIN
+    ALTER TABLE [CustomQuotationRevisions] ADD [BouquetSnapshot] nvarchar(max) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113102019_AddCustomBouquetSnapshots'
+)
+BEGIN
+    ALTER TABLE [CustomOrderRequests] ADD [BouquetSnapshot] nvarchar(max) NULL;
+END;
+GO
+
+IF NOT EXISTS (
+    SELECT * FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20261113102019_AddCustomBouquetSnapshots'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20261113102019_AddCustomBouquetSnapshots', N'8.0.22');
+END;
+GO
+
+COMMIT;
+GO
+

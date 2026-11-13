@@ -1,5 +1,7 @@
 using System.Net;
 using System.Text.Json;
+using HoaSap.BLL.CustomOrders;
+using Microsoft.Extensions.Options;
 using HoaSap.DAL;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -41,8 +43,8 @@ public sealed class CustomOrderFlowTests(ApiFixture fixture) : ApiTestBase(fixtu
         return json.RootElement.EnumerateArray().Single(x => x.GetProperty("id").GetGuid() == id).Clone();
     }
 
-    static Task<HttpResponseMessage> QuoteAsync(HttpClient admin, Guid id, decimal unitPrice = 200000m, decimal depositPercent = 50m) =>
-        admin.PostAsync($"/api/custom-orders/{id}/quote", Json(new { unitPrice, depositPercent, completionDate = DateTime.UtcNow.AddDays(4), adminNote = "Báo giá" }));
+    static Task<HttpResponseMessage> QuoteAsync(HttpClient admin, Guid id, decimal unitPrice = 200000m, decimal depositPercent = 50m, DateTime? requestUpdatedAt = null) =>
+        admin.PostAsync($"/api/custom-orders/{id}/quote", Json(new { unitPrice, depositPercent, requestUpdatedAt, completionDate = DateTime.UtcNow.AddDays(4), adminNote = "Báo giá" }));
 
     static async Task<Guid> RequestAsync(Flow flow, int quantity = 1, string description = "Mẫu hoa theo yêu cầu")
     {
@@ -60,6 +62,43 @@ public sealed class CustomOrderFlowTests(ApiFixture fixture) : ApiTestBase(fixtu
         checkout.EnsureSuccessStatusCode();
         using var body = JsonDocument.Parse(await checkout.Content.ReadAsStringAsync());
         return (id, body.RootElement.GetProperty("orderId").GetGuid());
+    }
+
+    [Fact]
+    public async Task BuilderCheckoutRejectsStaleRevisionAndUsesFrozenComposition()
+    {
+        var flow = await SetupAsync();
+        fixture.Services.GetRequiredService<IOptions<BouquetCatalog>>().Value.ProductId = flow.Product;
+        var invalid = await flow.Customer.PostAsync("/api/custom-orders", Json(new {
+            productId = flow.Product, quantity = 1, description = "Cấu hình sai",
+            bouquet = new { wrapId = "classic", lines = new[] { new { id = "leaf", quantity = 7 } } }
+        }));
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        var id = await IdAsync(await flow.Customer.PostAsync("/api/custom-orders", Json(new {
+            productId = flow.Product, quantity = 2, description = "Bó tự phối", provinceId = 1000001, wardId = 1003580,
+            bouquet = new { wrapId = "classic", lines = new[] { new { id = "rose", quantity = 7 } } }
+        })));
+        var request = await FindAsync(flow.Customer, id);
+        Assert.Equal(146000, request.GetProperty("bouquet").GetProperty("estimatedUnitPrice").GetDecimal());
+        var updatedAt = request.GetProperty("updatedAt").GetDateTime();
+        (await QuoteAsync(flow.Admin, id, requestUpdatedAt: updatedAt)).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Conflict, (await QuoteAsync(flow.Admin, id, requestUpdatedAt: updatedAt)).StatusCode);
+        var current = await FindAsync(flow.Customer, id);
+        var reissued = await QuoteAsync(flow.Admin, id, requestUpdatedAt: current.GetProperty("updatedAt").GetDateTime());
+        reissued.EnsureSuccessStatusCode();
+        using var quote = JsonDocument.Parse(await reissued.Content.ReadAsStringAsync());
+        Assert.Equal(7, quote.RootElement.GetProperty("revisions")[1].GetProperty("bouquet").GetProperty("lines")[0].GetProperty("quantity").GetInt32());
+        (await flow.Customer.PostAsync($"/api/custom-orders/{id}/approve", Json(new { version = 2 }))).EnsureSuccessStatusCode();
+        Task<HttpResponseMessage> Checkout(int version, int wardId) => flow.Customer.PostAsync($"/api/custom-orders/{id}/checkout", Json(new {
+            shippingAddress = "12 Đường Hoa", idempotencyKey = "bouquet-checkout", quoteVersion = version, provinceId = 1000001, wardId
+        }));
+        Assert.Equal(HttpStatusCode.Conflict, (await Checkout(1, 1003580)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Checkout(2, 123)).StatusCode);
+        using var first = JsonDocument.Parse(await (await Checkout(2, 1003580)).Content.ReadAsStringAsync());
+        using var retry = JsonDocument.Parse(await (await Checkout(2, 1003580)).Content.ReadAsStringAsync());
+        Assert.Equal(first.RootElement.GetProperty("orderId").GetGuid(), retry.RootElement.GetProperty("orderId").GetGuid());
+        Assert.Equal(400000, first.RootElement.GetProperty("totalAmount").GetDecimal());
     }
 
     [Fact]
