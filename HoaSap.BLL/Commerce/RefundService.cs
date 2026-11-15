@@ -15,6 +15,12 @@ public sealed class RefundRequestDto
     public string Reason { get; set; } = "";
 }
 
+public sealed class CustomerRefundRequestDto
+{
+    public string Reason { get; set; } = "";
+    public decimal? Amount { get; set; }
+}
+
 public sealed class RefundDecisionDto
 {
     public string? Reason { get; set; }
@@ -91,6 +97,95 @@ public sealed class RefundService(HoaSapDbContext db)
         db.Refunds.Add(refund);
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
         return ToDto(refund);
+    }
+
+    public async Task<RefundDto> CustomerRequestRefundAsync(Guid customerId, Guid orderId, CustomerRefundRequestDto request, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 500)
+            throw new BusinessException(400, "Lý do hoàn tiền bắt buộc và không quá 500 ký tự.");
+
+        await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        var order = await db.Orders.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == orderId && x.CustomerId == customerId, ct)
+            ?? throw new BusinessException(404, "Không tìm thấy đơn hàng của bạn.");
+
+        if (order.OrderStatus is "Cancelled" or "Expired")
+            throw new BusinessException(409, "Đơn hàng đã ở trạng thái hủy hoặc hết hạn.");
+
+        if (order.OrderStatus is "Delivering")
+            throw new BusinessException(409, "Đơn hàng đang trong quá trình giao hàng. Quý khách không thể tự hoàn tiền khi bưu tá đang giao. Vui lòng liên hệ Admin/Cửa hàng để thu hồi hàng trước.");
+
+        // BẢO VỆ CHẶT CHẼ LIÊN KẾT GIAO HÀNG (GHN):
+        // Nếu shipper đang trên đường giao hàng (Picking/Delivering/InTransit/Shipped), chặn tuyệt đối không cho tự hoàn tiền.
+        var activeDelivery = await db.Deliveries
+            .AsNoTracking()
+            .Where(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled")
+            .OrderByDescending(x => x.ShippedAt)
+            .FirstOrDefaultAsync(ct);
+
+        if (activeDelivery is not null && activeDelivery.DeliveryStatus is "Picking" or "Delivering" or "InTransit" or "Shipped")
+        {
+            throw new BusinessException(409, "Đơn hàng đang trong quá trình vận chuyển bởi Giao Hàng Nhanh. Quý khách không thể tự hoàn tiền khi bưu tá đang giao. Vui lòng liên hệ Admin/Cửa hàng để thu hồi hàng trước.");
+        }
+
+        if (order.PaymentStatus is not ("Paid" or "PartiallyPaid" or "PartiallyRefunded"))
+            throw new BusinessException(409, "Đơn hàng chưa có khoản thanh toán được ghi nhận để hoàn tiền.");
+
+        var paid = await PaidOrderAsync(orderId, ct);
+        var reserved = (await db.Refunds.Where(x => x.OrderId == orderId && x.RefundStatus != "Rejected")
+            .Select(x => x.RefundAmount).ToListAsync(ct)).Sum();
+        var refundable = paid - reserved;
+        if (refundable <= 0) throw new BusinessException(400, "Đơn hàng không còn số tiền khả dụng để hoàn.");
+
+        var refundAmount = request.Amount is { } reqAmt && reqAmt > 0 ? reqAmt : refundable;
+        if (refundAmount > refundable)
+            throw new BusinessException(400, $"Số tiền yêu cầu hoàn ({refundAmount:N0} đ) vượt quá số tiền đã thanh toán còn lại ({refundable:N0} đ).");
+
+        // Nếu đơn hàng chưa xuất kho hoặc vận đơn GHN đã hủy: hủy đơn an toàn, giải phóng kho và hoàn voucher
+        if (activeDelivery is null || activeDelivery.DeliveryStatus == "Cancelled")
+        {
+            if (order.OrderStatus is not ("Cancelled" or "Expired"))
+            {
+                if (!await db.Set<CustomOrderCheckout>().AnyAsync(x => x.OrderId == order.Id, ct))
+                    await ReleaseReservedAsync(order.Items, ct);
+                if (order.VoucherId is { } voucherId)
+                {
+                    if (await db.ExecuteUpdateAuditedAsync(db.Vouchers.Where(v => v.Id == voucherId && v.UsedCount > 0), x => x.SetProperty(v => v.UsedCount, v => v.UsedCount - 1), ct) != 1)
+                        throw new BusinessException(409, "Không thể hoàn lại lượt sử dụng voucher.");
+                }
+                order.OrderStatus = "Cancelled";
+                var link = await db.Set<CustomOrderCheckout>().SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
+                if (link is not null)
+                {
+                    var quote = await db.Set<CustomQuotation>().SingleAsync(x => x.Id == link.CustomQuotationId, ct);
+                    var custom = await db.Set<CustomOrderRequest>().SingleAsync(x => x.Id == quote.CustomOrderRequestId, ct);
+                    quote.Status = custom.Status = "Cancelled";
+                    quote.UpdatedAt = custom.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+        }
+
+        var refund = new Refund
+        {
+            OrderId = orderId,
+            RefundAmount = refundAmount,
+            RefundReason = request.Reason.Trim(),
+            RefundStatus = "Requested",
+            ApprovedBy = "",
+            RequestedAt = DateTime.UtcNow,
+            ConcurrencyToken = Guid.NewGuid()
+        };
+        db.Refunds.Add(refund);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return ToDto(refund);
+    }
+
+    public async Task<IReadOnlyList<RefundDto>> GetOrderRefundsForCustomerAsync(Guid customerId, Guid orderId, CancellationToken ct = default)
+    {
+        var orderExists = await db.Orders.AnyAsync(x => x.Id == orderId && x.CustomerId == customerId, ct);
+        if (!orderExists) throw new BusinessException(404, "Không tìm thấy đơn hàng của bạn.");
+        var refunds = await db.Refunds.AsNoTracking().Where(x => x.OrderId == orderId).OrderByDescending(x => x.RequestedAt).ToListAsync(ct);
+        return refunds.Select(ToDto).ToList();
     }
 
     public async Task<RefundDto> ApproveAsync(Guid id, string actor, CancellationToken ct = default) => await DecideAsync(id, "Approved", actor, ct);

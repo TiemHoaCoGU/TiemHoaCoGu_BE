@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace HoaSap.API.Controllers;
 
 [ApiController, Route("api/orders")]
-public sealed class OrdersController(CommerceService service) : ControllerBase
+public sealed class OrdersController(CommerceService service, RefundService refundService) : ControllerBase
 {
     Guid? Me() { var x = User.FindFirstValue(ClaimTypes.NameIdentifier); return Guid.TryParse(x, out var id) ? id : null; }
     [HttpPost("checkout")] public Task<OrderDto> Checkout(CheckoutRequest r, CancellationToken ct) => service.CheckoutAsync(Me(), r, ct);
@@ -14,6 +14,8 @@ public sealed class OrdersController(CommerceService service) : ControllerBase
     [HttpGet("{id:guid}/deliveries")][Authorize] public Task<IReadOnlyList<DeliveryDto>> Deliveries(Guid id, CancellationToken ct) => service.DeliveriesAsync(Me() ?? throw new UnauthorizedAccessException(), id, ct);
     [HttpGet("staff/{id:guid}/deliveries"), Authorize(Roles = "Admin,Staff")] public Task<IReadOnlyList<DeliveryDto>> StaffDeliveries(Guid id, CancellationToken ct) => service.StaffDeliveriesAsync(id, ct);
     [HttpPost("{id:guid}/cancel")][Authorize] public async Task<IActionResult> Cancel(Guid id, CancellationToken ct) { await service.CancelAsync(Me() ?? throw new UnauthorizedAccessException(), id, ct); return NoContent(); }
+    [HttpPost("{id:guid}/refund-request"), Authorize] public Task<RefundDto> RequestRefund(Guid id, [FromBody] CustomerRefundRequestDto request, CancellationToken ct) => refundService.CustomerRequestRefundAsync(Me() ?? throw new UnauthorizedAccessException(), id, request, ct);
+    [HttpGet("{id:guid}/refunds"), Authorize] public Task<IReadOnlyList<RefundDto>> Refunds(Guid id, CancellationToken ct) => refundService.GetOrderRefundsForCustomerAsync(Me() ?? throw new UnauthorizedAccessException(), id, ct);
     [HttpGet("staff"), Authorize(Roles = "Admin,Staff")] public Task<IReadOnlyList<OrderDto>> Staff(CancellationToken ct) => service.StaffOrdersAsync(ct);
     [HttpPost("{id:guid}/status"), Authorize(Roles = "Admin,Staff")] public async Task<IActionResult> Status(Guid id, StatusRequest r, CancellationToken ct) { await service.TransitionAsync(id, r.Status, ct); return NoContent(); }
     [HttpPost("{id:guid}/deliveries"), Authorize(Roles = "Admin,Staff")] public Task<DeliveryDto> Delivery(Guid id, DeliveryRequest r, CancellationToken ct) => service.DeliveryAsync(id, r, ct);
