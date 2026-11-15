@@ -214,6 +214,14 @@ public sealed class CustomOrderService(HoaSapDbContext db, IGhnStagingAddressCat
             if (ward is null) throw Error(400, "Phường không thuộc tỉnh đã chọn trong danh mục GHN.");
             provinceId = province.Id; provinceName = province.Name; wardId = ward.Id; wardName = ward.Name;
         }
+        else if (request.DeliveryProvinceId is not null && request.DeliveryWardId is not null)
+        {
+            // The request already carries a GHN area validated against the catalogue at
+            // creation/update time: reuse it instead of leaving the order without one,
+            // which would fail delivery creation later with no API to fix the order.
+            provinceId = request.DeliveryProvinceId; provinceName = request.DeliveryProvinceName;
+            wardId = request.DeliveryWardId; wardName = request.DeliveryWardName;
+        }
         var fullAddress = wardName is null ? streetAddress : $"{streetAddress}, {wardName}, {provinceName}";
         var address = $"ReceiverName: {receiverName}; ReceiverPhone: {receiverPhone}; ReceiverEmail: {customer?.Email ?? ""}; Address: {fullAddress}";
         var key = input.IdempotencyKey.Trim();
