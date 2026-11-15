@@ -56,7 +56,7 @@ public sealed class ShippingQuoteService(HoaSapDbContext db, ICarrierAdapter car
             return new CarrierShipmentItem(product.Name, product.Code, x.Quantity, product.Price, product.ShippingWeightGrams ?? 500,
                 (int?)product.PackageLengthCm, (int?)product.PackageWidthCm, (int?)product.PackageHeightCm);
         }).ToList();
-        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight, request.ProvinceId, request.WardId,
+        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight,
             ToName: customer?.FullName, ToPhone: customer?.PhoneNumber, ToWardName: request.WardName.Trim(), ToProvinceName: request.ProvinceName.Trim(), Items: rateItems);
         try { result = await carrier.QuoteAsync(rateRequest, ct); }
         catch (InvalidOperationException) when (carrier is DisabledCarrier) { throw new BusinessException(503, "Nhà vận chuyển chưa được cấu hình; không tạo báo giá."); }

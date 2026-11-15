@@ -401,7 +401,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
                 var remaining = Math.Max(0m, order.TotalAmount - paid);
                 var share = order.SubTotal > 0 ? deliveredGoods / order.SubTotal : (deliveredGoods > 0 ? 1m : 0m);
                 var codAmount = Math.Round(remaining * share, 0, MidpointRounding.AwayFromZero);
-                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, null, null, shipWeightKg, Math.Max(1, maxLengthCm), Math.Max(1, maxWidthCm), Math.Max(1, totalHeightCm), codAmount, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems, order.ShippingWardName, order.ShippingProvinceName), ct);
+                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, shipWeightKg, Math.Max(1, maxLengthCm), Math.Max(1, maxWidthCm), Math.Max(1, totalHeightCm), codAmount, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems, order.ShippingWardName, order.ShippingProvinceName), ct);
                 if (!shipRes.Accepted || string.IsNullOrWhiteSpace(shipRes.TrackingNumber))
                     throw new BusinessException(502, shipRes.ErrorMessage ?? "GHN không trả về mã vận đơn; chưa tạo phiếu giao.");
                 delivery.TrackingNumber = shipRes.TrackingNumber;
