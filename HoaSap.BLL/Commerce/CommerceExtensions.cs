@@ -89,7 +89,12 @@ public sealed class CarrierOptions : CommerceGatewayOptions
     public string SenderName { get; set; } = "Tiệm Hoa Cô Gu";
     public string SenderPhone { get; set; } = "0901234567";
     public string SenderAddress { get; set; } = "72 Lê Thánh Tôn, Bến Nghé, Quận 1, Hồ Chí Minh";
-    public bool SandboxEmulation { get; set; } = true;
+    public string SenderWardName { get; set; } = "";
+    public string SenderProvinceName { get; set; } = "";
+    public bool IsNewFromAddress { get; set; } = true;
+    public int PaymentTypeId { get; set; } = 1;
+    public string RequiredNote { get; set; } = "CHOXEMHANGKHONGTHU";
+    public bool SandboxEmulation { get; set; }
 }
 public sealed record GatewayChargeRequest(Guid OrderId, decimal Amount, string Currency, string ReturnUrl, string ProviderKey = "");
 public sealed record GatewayChargeResult(bool Accepted, string TransactionCode, string? RedirectUrl, string? RawResponse);
@@ -103,8 +108,11 @@ public sealed record CarrierRateRequest(
     int? LengthCm = null,
     int? WidthCm = null,
     int? HeightCm = null,
-    int? ToProvinceId = null,
-    int? ToWardId = null);
+    string? ToName = null,
+    string? ToPhone = null,
+    string? ToWardName = null,
+    string? ToProvinceName = null,
+    IReadOnlyList<CarrierShipmentItem>? Items = null);
 public sealed record CarrierRateResult(bool Accepted, decimal Amount, string? TrackingNumber, string? RawResponse);
 
 public sealed record CarrierShipmentItem(
@@ -123,15 +131,16 @@ public sealed record CarrierShipmentRequest(
     string RecipientName,
     string RecipientPhone,
     string DestinationAddress,
-    int? ToProvinceId,
-    int? ToWardId,
     decimal WeightKg,
     int? LengthCm,
     int? WidthCm,
     int? HeightCm,
     decimal CodAmount,
     string Note,
-    IReadOnlyList<CarrierShipmentItem> Items);
+    IReadOnlyList<CarrierShipmentItem> Items,
+    string? ToWardName = null,
+    string? ToProvinceName = null,
+    bool IsNewAddress = true);
 
 public sealed record CarrierShipmentResult(
     bool Accepted,
@@ -147,13 +156,25 @@ public sealed record CarrierCancelResult(
     string? Message,
     string? RawResponse);
 
+/// <summary>One entry of the carrier's public status history, newest last.</summary>
+public sealed record CarrierTrackingEvent(
+    string Status,
+    string? Description,
+    DateTime? OccurredAt,
+    string? Note);
+
 public sealed record CarrierTrackingResult(
     bool Accepted,
     string TrackingNumber,
     string Status,
     string? StatusDescription,
     DateTime? UpdatedAt,
-    string? RawResponse);
+    string? RawResponse,
+    IReadOnlyList<CarrierTrackingEvent>? Events = null,
+    decimal? CodAmount = null,
+    bool? CodCollected = null,
+    DateTime? CodCollectedAt = null,
+    DateTime? LeadTime = null);
 
 public interface IPaymentGateway
 {

@@ -47,8 +47,12 @@ public sealed class ShippingQuoteTests
         await using var s = await Store.CreateAsync();
         var quote = await s.Shipping.QuoteAsync(s.Customer.Id, new("42 Test Street", 1000001, "Hồ Chí Minh", 1003580, "Phường Thủ Đức", 0.001m));
         Assert.Equal(42000m, quote.Amount); Assert.Equal("Warehouse A", quote.Origin); Assert.Equal(1.5m, s.Carrier.Last!.Weight);
+        Assert.Equal("Phường Thủ Đức", s.Carrier.Last!.ToWardName); Assert.Equal("Hồ Chí Minh", s.Carrier.Last!.ToProvinceName);
+        Assert.Equal("Receiver", s.Carrier.Last!.ToName); Assert.Equal("0900000003", s.Carrier.Last!.ToPhone);
         Assert.Equal("42 Test Street, Phường Thủ Đức, Hồ Chí Minh", quote.Destination);
         var stored = await s.Db.ShippingQuotes.SingleAsync(); Assert.Equal(s.Customer.Id, stored.CustomerId); Assert.Null(stored.OrderId); Assert.Equal(64, stored.CartFingerprint.Length);
+        Assert.Equal(1000001, stored.ProvinceId); Assert.Equal("Hồ Chí Minh", stored.ProvinceName);
+        Assert.Equal(1003580, stored.WardId); Assert.Equal("Phường Thủ Đức", stored.WardName);
     }
 
     [Fact]
@@ -195,6 +199,9 @@ public sealed class ShippingQuoteTests
         Assert.Equal("GHN", delivery.ShipperUnit);
         Assert.Equal("Preparing", delivery.DeliveryStatus);
         Assert.True(delivery.ShippingCost > 0);
+        var persisted = await s.Db.Orders.SingleAsync();
+        Assert.Equal(1000001, persisted.ShippingProvinceId); Assert.Equal("Hồ Chí Minh", persisted.ShippingProvinceName);
+        Assert.Equal(1003580, persisted.ShippingWardId); Assert.Equal("Phường Thủ Đức", persisted.ShippingWardName);
 
         // Track delivery
         var tracking = await commerce.TrackDeliveryAsync(order.Id, delivery.Id, s.Customer.Id, false);
