@@ -92,9 +92,37 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var x = await db.WorkshopSessions.FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new BusinessException(404, "Không tìm thấy ca học.");
         if (x.SessionStatus == "Cancelled") { await tx.CommitAsync(ct); return; }
-        var active = await db.WorkshopBookings.AnyAsync(b => b.SessionId == id && b.BookingStatus != "cancelled" && b.BookingStatus != "expired" && b.BookingStatus != "attended" && b.BookingStatus != "no_show", ct);
-        if (active) throw new BusinessException(409, "Không thể hủy ca học đang có booking hoạt động.");
-        x.SessionStatus = "Cancelled"; await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
+
+        var activeBookings = await db.WorkshopBookings
+            .Where(b => b.SessionId == id && b.BookingStatus != "cancelled" && b.BookingStatus != "expired" && b.BookingStatus != "attended" && b.BookingStatus != "no_show")
+            .ToListAsync(ct);
+
+        foreach (var b in activeBookings)
+        {
+            b.BookingStatus = "cancelled";
+            b.CancelReason = "Ca học bị hủy bởi Cửa hàng - Tự động hoàn tiền 100%";
+            var paid = await PaidAmountAsync(b.Id, ct);
+            var reservedRefunds = (await db.Refunds.Where(r => r.BookingId == b.Id && r.RefundStatus != "Rejected").Select(r => r.RefundAmount).ToListAsync(ct)).Sum();
+            var refundable = paid - reservedRefunds;
+            if (refundable > 0)
+            {
+                db.Refunds.Add(new Refund
+                {
+                    BookingId = b.Id,
+                    RefundAmount = refundable,
+                    RefundReason = "Ca học bị hủy bởi Cửa hàng - Tự động hoàn tiền 100%",
+                    RefundStatus = "Requested",
+                    ApprovedBy = "",
+                    ProcessedAt = null,
+                    ConcurrencyToken = Guid.NewGuid()
+                });
+            }
+        }
+
+        x.SessionStatus = "Cancelled";
+        x.BookedSlots = 0;
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<BookingDto> HoldBookingAsync(Guid sessionId, BookingRequest r, Guid? customerId, CancellationToken ct = default)
@@ -211,12 +239,46 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (session.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hủy booking.");
         if (SessionStartUtc(session) <= DateTime.UtcNow) throw new BusinessException(409, "Chỉ được hủy booking trước giờ bắt đầu.");
         if (staff && string.IsNullOrWhiteSpace(reason)) throw new BusinessException(400, "Nhân viên phải nêu lý do hủy booking.");
+        var sessionStart = SessionStartUtc(session);
+        var hoursUntilStart = (sessionStart - DateTime.UtcNow).TotalHours;
+
+        decimal refundRate = 1.0m;
+        string refundReason = "Khách hủy trước 48h - Hoàn 100% tiền vé";
+
+        if (!staff)
+        {
+            if (hoursUntilStart < 48)
+            {
+                refundRate = 0.70m;
+                refundReason = "Khách hủy trong vòng 48h - Hoàn 70% (giữ lại 30% phí chuẩn bị nguyên vật liệu)";
+            }
+        }
+        else
+        {
+            refundReason = string.IsNullOrWhiteSpace(reason)
+                ? "Cửa hàng hủy booking - Hoàn 100% tiền vé"
+                : $"Cửa hàng hủy: {reason.Trim()} - Hoàn 100% tiền vé";
+        }
+
         b.BookingStatus = "cancelled"; b.CancelReason = reason?.Trim() ?? "";
         session.BookedSlots -= b.TicketCount; SetFullOrOpen(session);
         var paid = await PaidAmountAsync(b.Id, ct);
         var reservedRefunds = (await db.Refunds.Where(x => x.BookingId == b.Id && x.RefundStatus != "Rejected").Select(x => x.RefundAmount).ToListAsync(ct)).Sum();
-        var refundable = paid - reservedRefunds;
-        if (refundable > 0) db.Refunds.Add(new Refund { BookingId = b.Id, RefundAmount = refundable, RefundReason = "Yêu cầu hoàn do hủy booking", RefundStatus = "Requested", ApprovedBy = "", ProcessedAt = null });
+        var maxRefundable = paid - reservedRefunds;
+        var refundable = Math.Round(maxRefundable * refundRate, 0);
+        if (refundable > 0)
+        {
+            db.Refunds.Add(new Refund
+            {
+                BookingId = b.Id,
+                RefundAmount = refundable,
+                RefundReason = refundReason,
+                RefundStatus = "Requested",
+                ApprovedBy = "",
+                ProcessedAt = null,
+                ConcurrencyToken = Guid.NewGuid()
+            });
+        }
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
     }
 
