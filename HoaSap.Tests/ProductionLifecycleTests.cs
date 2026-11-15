@@ -185,6 +185,37 @@ public sealed class ProductionLifecycleTests
             Assert.Equal(20, shipment.HeightCm);     // 2 boxes stacked, 10 cm each
             Assert.Equal("Phường Thủ Đức", shipment.ToWardName);
             Assert.Equal("Hồ Chí Minh", shipment.ToProvinceName);
+            // Full unpaid delivery collects the whole TotalAmount (200,000 goods + 42,000 shipping fee),
+            // not just the goods sum: the voucher discount and shipping fee live in TotalAmount.
+            Assert.Equal(242_000m, shipment.CodAmount);
+        }
+    }
+
+    [Fact]
+    public async Task PaidOrderShipsWithZeroCod()
+    {
+        var (f, admin) = await StartAsync(); using (f) using (admin)
+        {
+            var p = await ProductAsync(admin, 1); using var c = await UserAsync(f); var (order, item) = await OrderAsync(c, p);
+            // TotalAmount = 100,000 goods + 42,000 synthetic carrier quote; record it in full first.
+            var pay = await admin.PostAsync($"/api/payments/order/{order}", Json(new { transactionCode = "PAY-" + Guid.NewGuid().ToString("N")[..12], paymentMethod = "Cash", amount = 142000m }));
+            pay.EnsureSuccessStatusCode();
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" }))).EnsureSuccessStatusCode();
+            (await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } }))).EnsureSuccessStatusCode();
+            Assert.Equal(0m, f.LastShipment!.CodAmount);
+        }
+    }
+
+    [Fact]
+    public async Task PartialDeliveryCollectsProratedCod()
+    {
+        var (f, admin) = await StartAsync(); using (f) using (admin)
+        {
+            var p = await ProductAsync(admin, 3); using var c = await UserAsync(f); var (order, item) = await OrderAsync(c, p, quantity: 2);
+            (await admin.PostAsync($"/api/orders/{order}/status", Json(new { status = "Processing" }))).EnsureSuccessStatusCode();
+            (await admin.PostAsync($"/api/orders/{order}/deliveries", Json(new { items = new[] { new { orderItemId = item, quantity = 1 } } }))).EnsureSuccessStatusCode();
+            // TotalAmount 242,000; half the goods shipped, so half the balance is collected.
+            Assert.Equal(121_000m, f.LastShipment!.CodAmount);
         }
     }
 
