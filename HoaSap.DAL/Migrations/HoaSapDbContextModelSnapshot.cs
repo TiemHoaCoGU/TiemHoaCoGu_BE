@@ -192,6 +192,9 @@ namespace HoaSap.DAL.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("BouquetSnapshot")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<DateTime?>("CompletedAt")
                         .HasColumnType("datetime2");
 
@@ -307,6 +310,9 @@ namespace HoaSap.DAL.Migrations
                         .IsRequired()
                         .HasMaxLength(2000)
                         .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("BouquetSnapshot")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTime>("CompletionDate")
                         .HasColumnType("datetime2");

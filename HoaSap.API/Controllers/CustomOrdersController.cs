@@ -13,6 +13,8 @@ public sealed class CustomOrdersController(CustomOrderService service) : Control
     bool Staff => User.IsInRole("Admin") || User.IsInRole("Staff");
     bool Admin => User.IsInRole("Admin");
 
+    [HttpGet("bouquet-catalog"), AllowAnonymous]
+    public Task<BouquetCatalog> BouquetCatalog(CancellationToken ct) => service.GetBouquetCatalogAsync(ct);
     [HttpPost]
     public Task<CustomRequestDto> Create(CustomRequestInput input, CancellationToken ct) => service.CreateAsync(CustomerId, input, ct);
     [HttpPut("{id:guid}")]
@@ -20,7 +22,7 @@ public sealed class CustomOrdersController(CustomOrderService service) : Control
     [HttpPost("{id:guid}/cancel")]
     public Task<CustomRequestDto> Cancel(Guid id, CancellationToken ct) => service.CancelRequestAsync(id, CustomerId, Admin, ct);
     [HttpGet]
-    public Task<IReadOnlyList<CustomRequestDto>> Mine(CancellationToken ct) => Staff ? service.StaffRequestsAsync(ct) : service.MineAsync(CustomerId, ct);
+    public Task<IReadOnlyList<CustomRequestDto>> Mine(CancellationToken ct) => Staff ? service.StaffRequestsAsync(!Admin, ct) : service.MineAsync(CustomerId, ct);
     [HttpGet("{id:guid}")]
     public Task<CustomQuoteDto> Get(Guid id, CancellationToken ct) => service.QuoteAsync(id, Staff ? null : CustomerId, Staff, Admin, ct);
     [HttpPost("{id:guid}/quote"), Authorize(Roles = "Admin")]
