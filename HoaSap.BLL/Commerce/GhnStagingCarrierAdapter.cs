@@ -89,9 +89,9 @@ public sealed class GhnStagingCarrierAdapter : ICarrierAdapter, IDisposable
         if (envelope.Code != 200 || envelope.Data is null || string.IsNullOrWhiteSpace(envelope.Data.OrderCode))
             throw new InvalidOperationException($"GHN từ chối tạo vận đơn ({envelope.Code}): {CleanMessage(envelope.Message)}");
 
-        var fee = envelope.Data.TotalFee > 0
-            ? (decimal)envelope.Data.TotalFee
-            : ComputeStandardTariff(_options.Origin, request.DestinationAddress, request.WeightKg);
+        // GHN accepted the order, so its fee stands even when it is 0 (e.g. free shipping):
+        // never substitute the internal emulation tariff for a real order.
+        var fee = (decimal)envelope.Data.TotalFee;
         return new CarrierShipmentResult(true, envelope.Data.OrderCode, fee, envelope.Data.ExpectedDeliveryTime, "ready_to_pick", raw);
     }
 
@@ -118,13 +118,25 @@ public sealed class GhnStagingCarrierAdapter : ICarrierAdapter, IDisposable
         if (_options.SandboxEmulation)
             return new CarrierTrackingResult(true, trackingNumber, "delivering", "Đang vận chuyển (SandboxEmulation=true)", DateTime.UtcNow, "SandboxEmulation");
 
-        var raw = await GetAsync($"v2/shipping-order/detail?order_code={Uri.EscapeDataString(trackingNumber)}", ct);
-        var envelope = Deserialize<GhnEnvelope<GhnTrackingData>>(raw);
+        GhnEnvelope<GhnTrackingData> envelope;
+        string raw;
+        try
+        {
+            // GHN detail requires POST with { order_code }: the GET form regressed to 405.
+            raw = await PostAsync("v2/shipping-order/detail", new { order_code = trackingNumber }, ct);
+            envelope = Deserialize<GhnEnvelope<GhnTrackingData>>(raw);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException or JsonException)
+        {
+            // HTTP / timeout / malformed payload: report failure instead of a 500, so the
+            // tracking panel can show accepted=false like the envelope-error branch below.
+            return new CarrierTrackingResult(false, trackingNumber, "Unknown", ex.Message, null, null);
+        }
         if (envelope.Code != 200 || envelope.Data is null)
             return new CarrierTrackingResult(false, trackingNumber, "Unknown", $"GHN không trả về trạng thái ({envelope.Code}): {CleanMessage(envelope.Message)}", null, raw);
 
         var data = envelope.Data;
-        var status = string.IsNullOrWhiteSpace(data.Status) ? "unknown" : data.Status;
+        var status = string.IsNullOrWhiteSpace(data.Status) ? "Unknown" : data.Status;
 
         // GHN returns the full status history in `log[]`. When the array is missing we still show
         // the current status so the panel is never empty.
@@ -256,23 +268,6 @@ public sealed class GhnStagingCarrierAdapter : ICarrierAdapter, IDisposable
         request.Headers.TryAddWithoutValidation("Token", EffectiveToken);
         request.Headers.TryAddWithoutValidation("ShopId", EffectiveShopId.ToString(CultureInfo.InvariantCulture));
         request.Content = JsonContent.Create(payload, options: JsonOptions);
-
-        using var response = await _http.SendAsync(request, cts.Token);
-        var raw = await response.Content.ReadAsStringAsync(cts.Token);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"GHN trả về HTTP {(int)response.StatusCode}: {TrimRaw(raw)}");
-        return raw;
-    }
-
-    private async Task<string> GetAsync(string path, CancellationToken ct)
-    {
-        EnsureConfigured();
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_options.TimeoutSeconds, 5, 30)));
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(new Uri(StagingBase), path));
-        request.Headers.TryAddWithoutValidation("Token", EffectiveToken);
-        request.Headers.TryAddWithoutValidation("ShopId", EffectiveShopId.ToString(CultureInfo.InvariantCulture));
 
         using var response = await _http.SendAsync(request, cts.Token);
         var raw = await response.Content.ReadAsStringAsync(cts.Token);

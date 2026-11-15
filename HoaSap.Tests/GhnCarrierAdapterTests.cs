@@ -174,7 +174,7 @@ public sealed class GhnCarrierAdapterTests
     }
 
     [Fact]
-    public async Task Tracking_uses_get_detail_and_reads_updated_date()
+    public async Task Tracking_uses_post_detail_and_reads_updated_date()
     {
         var handler = new StubHandler();
         handler.Responses.Enqueue((HttpStatusCode.OK, "{\"code\":200,\"message\":\"Success\",\"data\":{\"status\":\"delivering\",\"updated_date\":\"2026-07-15T04:49:47.811Z\"}}"));
@@ -190,9 +190,9 @@ public sealed class GhnCarrierAdapterTests
         Assert.Equal("delivering", single.Status);
         Assert.Equal("Đang giao hàng", single.Description);
         var request = Assert.Single(handler.Requests);
-        Assert.Equal(HttpMethod.Get, request.Method);
-        Assert.Equal("https://dev-online-gateway.ghn.vn/shiip/public-api/v2/shipping-order/detail?order_code=LADH94", request.Uri.ToString());
-        Assert.Null(request.Body);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://dev-online-gateway.ghn.vn/shiip/public-api/v2/shipping-order/detail", request.Uri.ToString());
+        Assert.Equal("LADH94", Payload(request).GetProperty("order_code").GetString());
     }
 
     [Fact]
