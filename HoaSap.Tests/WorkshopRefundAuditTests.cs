@@ -133,4 +133,163 @@ public sealed class WorkshopRefundAuditTests : ApiTestBase
             Assert.Equal(adminId.ToString(), refund.ApprovedBy);
         }
     }
+
+    [Fact]
+    public async Task WorkshopCancellation_Within48Hours_Issues70PercentRefund()
+    {
+        using var admin = await AuthenticatedAsync(await AdminTokenAsync());
+        var workshopResponse = await admin.PostAsync("/api/workshops", Json(new
+        {
+            code = "WS48H-" + Guid.NewGuid().ToString("N")[..8],
+            name = "48h Policy Workshop",
+            basePrice = 200000m,
+            duration = 90,
+            maxCapacity = 5,
+            isActive = true
+        }));
+        workshopResponse.EnsureSuccessStatusCode();
+        using var workshopJson = JsonDocument.Parse(await workshopResponse.Content.ReadAsStringAsync());
+        var workshopId = workshopJson.RootElement.GetProperty("id").GetGuid();
+
+        var sessionTime = DateTime.UtcNow.AddHours(24);
+        var sessionResponse = await admin.PostAsync($"/api/workshops/{workshopId}/sessions", Json(new
+        {
+            sessionDate = sessionTime.Date,
+            startTime = sessionTime.ToString("HH:mm:ss"),
+            endTime = sessionTime.AddHours(2).ToString("HH:mm:ss"),
+            location = "Studio 48h",
+            capacity = 5
+        }));
+        sessionResponse.EnsureSuccessStatusCode();
+        using var sessionJson = JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
+        var sessionId = sessionJson.RootElement.GetProperty("id").GetGuid();
+
+        using var customer = fixture.CreateClient();
+        var email = $"ws48h-{Guid.NewGuid():N}@example.test";
+        var registration = await customer.PostAsync("/api/auth/register", Json(new
+        {
+            fullName = "Customer 48h",
+            phoneNumber = "09" + Random.Shared.Next(100000000, 999999999),
+            email,
+            password = "Password-123!"
+        }));
+        registration.EnsureSuccessStatusCode();
+        using (var registrationJson = JsonDocument.Parse(await registration.Content.ReadAsStringAsync()))
+            customer.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", registrationJson.RootElement.GetProperty("accessToken").GetString());
+
+        var bookingResponse = await customer.PostAsync($"/api/bookings/sessions/{sessionId}", Json(new
+        {
+            ticketCount = 1,
+            customerName = "Customer 48h",
+            customerPhone = "0901234567",
+            idempotencyKey = "ws48h-" + Guid.NewGuid().ToString("N")
+        }));
+        bookingResponse.EnsureSuccessStatusCode();
+        using var bookingJson = JsonDocument.Parse(await bookingResponse.Content.ReadAsStringAsync());
+        var bookingId = bookingJson.RootElement.GetProperty("id").GetGuid();
+
+        var payment = await admin.PostAsync($"/api/payments/booking/{bookingId}", Json(new
+        {
+            transactionCode = "PAY-" + Guid.NewGuid().ToString("N"),
+            paymentMethod = "Cash",
+            amount = 200000m
+        }));
+        payment.EnsureSuccessStatusCode();
+
+        var cancel = await customer.PostAsync($"/api/bookings/{bookingId}/cancel", Json("Bận việc"));
+        cancel.EnsureSuccessStatusCode();
+
+        using (var scope = fixture.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<HoaSapDbContext>();
+            var booking = await db.WorkshopBookings.SingleAsync(b => b.Id == bookingId);
+            Assert.Equal("cancelled", booking.BookingStatus);
+
+            var refund = await db.Refunds.SingleAsync(r => r.BookingId == bookingId);
+            Assert.Equal("Requested", refund.RefundStatus);
+            Assert.Equal(140000m, refund.RefundAmount);
+            Assert.Contains("70%", refund.RefundReason);
+        }
+    }
+
+    [Fact]
+    public async Task SessionCancellation_ByAdmin_AutoCancelsAndIssues100PercentRefund()
+    {
+        using var admin = await AuthenticatedAsync(await AdminTokenAsync());
+        var workshopResponse = await admin.PostAsync("/api/workshops", Json(new
+        {
+            code = "WSCANCEL-" + Guid.NewGuid().ToString("N")[..8],
+            name = "Session Cancel Workshop",
+            basePrice = 150000m,
+            duration = 90,
+            maxCapacity = 5,
+            isActive = true
+        }));
+        workshopResponse.EnsureSuccessStatusCode();
+        using var workshopJson = JsonDocument.Parse(await workshopResponse.Content.ReadAsStringAsync());
+        var workshopId = workshopJson.RootElement.GetProperty("id").GetGuid();
+
+        var sessionTime = DateTime.UtcNow.AddDays(2);
+        var sessionResponse = await admin.PostAsync($"/api/workshops/{workshopId}/sessions", Json(new
+        {
+            sessionDate = sessionTime.Date,
+            startTime = sessionTime.ToString("HH:mm:ss"),
+            endTime = sessionTime.AddHours(2).ToString("HH:mm:ss"),
+            location = "Studio Cancel",
+            capacity = 5
+        }));
+        sessionResponse.EnsureSuccessStatusCode();
+        using var sessionJson = JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
+        var sessionId = sessionJson.RootElement.GetProperty("id").GetGuid();
+
+        using var customer = fixture.CreateClient();
+        var email = $"wscancel-{Guid.NewGuid():N}@example.test";
+        var registration = await customer.PostAsync("/api/auth/register", Json(new
+        {
+            fullName = "Customer Session Cancel",
+            phoneNumber = "09" + Random.Shared.Next(100000000, 999999999),
+            email,
+            password = "Password-123!"
+        }));
+        registration.EnsureSuccessStatusCode();
+        using (var registrationJson = JsonDocument.Parse(await registration.Content.ReadAsStringAsync()))
+            customer.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", registrationJson.RootElement.GetProperty("accessToken").GetString());
+
+        var bookingResponse = await customer.PostAsync($"/api/bookings/sessions/{sessionId}", Json(new
+        {
+            ticketCount = 1,
+            customerName = "Customer Session Cancel",
+            customerPhone = "0901234567",
+            idempotencyKey = "wscancel-" + Guid.NewGuid().ToString("N")
+        }));
+        bookingResponse.EnsureSuccessStatusCode();
+        using var bookingJson = JsonDocument.Parse(await bookingResponse.Content.ReadAsStringAsync());
+        var bookingId = bookingJson.RootElement.GetProperty("id").GetGuid();
+
+        var payment = await admin.PostAsync($"/api/payments/booking/{bookingId}", Json(new
+        {
+            transactionCode = "PAY-" + Guid.NewGuid().ToString("N"),
+            paymentMethod = "Cash",
+            amount = 150000m
+        }));
+        payment.EnsureSuccessStatusCode();
+
+        var cancelSession = await admin.DeleteAsync($"/api/workshops/sessions/{sessionId}");
+        cancelSession.EnsureSuccessStatusCode();
+
+        using (var scope = fixture.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<HoaSapDbContext>();
+            var session = await db.WorkshopSessions.SingleAsync(s => s.Id == sessionId);
+            Assert.Equal("Cancelled", session.SessionStatus);
+
+            var booking = await db.WorkshopBookings.SingleAsync(b => b.Id == bookingId);
+            Assert.Equal("cancelled", booking.BookingStatus);
+
+            var refund = await db.Refunds.SingleAsync(r => r.BookingId == bookingId);
+            Assert.Equal("Requested", refund.RefundStatus);
+            Assert.Equal(150000m, refund.RefundAmount);
+            Assert.Contains("100%", refund.RefundReason);
+        }
+    }
 }
