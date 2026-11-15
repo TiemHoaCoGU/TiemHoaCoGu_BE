@@ -86,6 +86,10 @@ public sealed record CapturedVnPayRequest(HttpMethod Method, string Url, string 
 
 public sealed class DisabledVnPayFixture : WebApplicationFactory<Program>
 {
+    public DisabledVnPayFixture()
+    {
+        Environment.SetEnvironmentVariable("Shipping__Carrier__SandboxEmulation", "true");
+    }
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"hoasap-vnpay-off-{Guid.NewGuid():N}.db");
     public const string AdminEmail = "qa-admin@example.test";
     public const string AdminPassword = "A-very-long-test-password-123!";
