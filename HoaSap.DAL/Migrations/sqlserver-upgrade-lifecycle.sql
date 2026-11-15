@@ -1,4 +1,7 @@
-﻿BEGIN TRANSACTION;
+﻿-- Upgrade script for an existing SQL Server database that is already at migration
+-- AddConfirmedPackagingSpecs (20261024142218). Do NOT run on a fresh database:
+-- fresh deployments use sqlserver-deploy.sql instead.
+BEGIN TRANSACTION;
 GO
 
 IF NOT EXISTS (

@@ -299,6 +299,9 @@ public sealed class GhnStagingCarrierAdapter : ICarrierAdapter, IDisposable
 
     private static string TrimRaw(string raw) => Truncate(raw.ReplaceLineEndings(" ").Trim(), 300);
 
+    // Chỉ dùng cho biểu cước mô phỏng: chỉ nhận ra các biến thể tên của Hồ Chí Minh
+    // và Hà Nội (trống = cùng tỉnh); hai địa chỉ cùng tỉnh khác sẽ bị tính giá liên
+    // tỉnh. Không dùng cho giá GHN thật.
     private static bool IsSameProvince(string origin, string destination)
     {
         if (string.IsNullOrWhiteSpace(origin) || string.IsNullOrWhiteSpace(destination)) return true;
