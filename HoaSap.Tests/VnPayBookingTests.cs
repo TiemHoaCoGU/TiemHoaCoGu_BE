@@ -51,10 +51,8 @@ public sealed class VnPayApiFixture : WebApplicationFactory<Program>
             ["BootstrapAdmin:FullName"] = "QA Admin",
             ["Shipping:Carrier:Origin"] = "Synthetic QA warehouse",
             ["Site:PublicUrl"] = "https://shop.example.test",
-            ["Payments:VnPay:TmnCode"] = TmnCode,
-            ["Payments:VnPay:HashSecret"] = HashSecret,
-            ["Payments:VnPay:PayUrl"] = "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html",
-            ["Payments:VnPay:ApiUrl"] = "https://sandbox.vnpayment.vn/merchant_webapi/api/transaction"
+            ["Payments:Gateway:VnPayTmnCode"] = TmnCode,
+            ["Payments:Gateway:VnPayHashSecret"] = HashSecret
         }));
         builder.ConfigureTestServices(services => services.AddHttpClient<VnPayClient>(client => client.DefaultRequestHeaders.UserAgent.ParseAdd("HoaSap/1.0")).ConfigurePrimaryHttpMessageHandler(() => Handler));
     }
@@ -101,7 +99,9 @@ public sealed class DisabledVnPayFixture : WebApplicationFactory<Program>
             ["Database:Initialize"] = "true", ["Database:Seed"] = "false", ["RateLimiting:PermitLimit"] = "100000", ["RateLimiting:AuthPermitLimit"] = "1000",
             ["Jwt:Key"] = VnPayApiFixture.TestJwtKey, ["Jwt:Issuer"] = "qa-tests", ["Jwt:Audience"] = "qa-tests",
             ["BootstrapAdmin:Email"] = AdminEmail, ["BootstrapAdmin:Password"] = AdminPassword, ["BootstrapAdmin:PhoneNumber"] = "0900000001", ["BootstrapAdmin:FullName"] = "QA Admin",
-            ["Shipping:Carrier:Origin"] = "Synthetic QA warehouse", ["Site:PublicUrl"] = "https://shop.example.test"
+            ["Shipping:Carrier:Origin"] = "Synthetic QA warehouse", ["Site:PublicUrl"] = "https://shop.example.test",
+            // Dev appsettings would otherwise enable VNPay via Payments:Gateway; blank the creds to keep it disabled here.
+            ["Payments:Gateway:VnPayTmnCode"] = "", ["Payments:Gateway:VnPayHashSecret"] = ""
         }));
     }
     protected override void Dispose(bool disposing)

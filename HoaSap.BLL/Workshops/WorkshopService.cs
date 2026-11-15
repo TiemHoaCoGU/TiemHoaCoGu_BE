@@ -2,17 +2,20 @@ using System.Data;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using HoaSap.BLL;
 using HoaSap.DAL;
 using HoaSap.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace HoaSap.BLL.Workshops;
 
-public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tickets = null)
+public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tickets = null, ILogger<WorkshopService>? logger = null)
 {
     private const decimal DepositRate = 0.30m;
     private static readonly string[] ManualMethods = ["Cash", "BankTransfer", "MoMo"];
+    private static readonly Regex VnMobileRegex = new(@"^(0|\+84)(3|5|7|8|9)[0-9]{8}$", RegexOptions.Compiled);
     private static readonly TimeZoneInfo VietnamTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
     private WorkshopTicketCodec Tickets => tickets ?? throw new InvalidOperationException("Workshop ticket signing is not configured.");
 
@@ -40,6 +43,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var x = await db.Workshops.FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new BusinessException(404, "Không tìm thấy workshop.");
         if (r.MaxCapacity < await db.WorkshopSessions.Where(s => s.WorkshopId == id).Select(s => (int?)s.BookedSlots).MaxAsync(ct)) throw new BusinessException(409, "Không thể giảm sức chứa workshop dưới số chỗ đã đặt.");
+        if (r.MaxCapacity < await db.WorkshopSessions.Where(s => s.WorkshopId == id).Select(s => (int?)s.Capacity).MaxAsync(ct)) throw new BusinessException(409, "Không thể giảm sức chứa workshop dưới sức chứa ca học.");
         x.Code = r.Code.Trim(); x.Name = r.Name.Trim(); x.ShortName = r.ShortName?.Trim() ?? ""; x.Category = r.Category?.Trim() ?? ""; x.BasePrice = r.BasePrice; x.Duration = r.Duration; x.MaxCapacity = r.MaxCapacity; x.Description = r.Description ?? ""; x.LeadContent = r.LeadContent ?? ""; x.GoalsJson = NormalizeArrayJson(r.GoalsJson); x.IncludesJson = NormalizeArrayJson(r.IncludesJson); x.ForWho = r.ForWho ?? ""; x.IsFeatured = r.IsFeatured; x.IsActive = r.IsActive; x.InstructorId = r.InstructorId;
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return ToDto(x);
     }
@@ -52,6 +56,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
 
     public async Task<IReadOnlyList<SessionDto>> SessionsAsync(Guid workshopId, bool staff = false, CancellationToken ct = default)
     {
+        if (!staff && !await db.Workshops.AsNoTracking().AnyAsync(x => x.Id == workshopId && x.IsActive, ct)) return [];
         // SQLite does not support ordering TimeSpan directly. Materialize before the time-of-day sort.
         var sessions = await db.WorkshopSessions.AsNoTracking()
             .Where(x => x.WorkshopId == workshopId && (staff || x.SessionStatus != "Cancelled"))
@@ -95,6 +100,11 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
     public async Task<BookingDto> HoldBookingAsync(Guid sessionId, BookingRequest r, Guid? customerId, CancellationToken ct = default)
     {
         if (r.TicketCount is < 1 or > 100 || string.IsNullOrWhiteSpace(r.CustomerName) || string.IsNullOrWhiteSpace(r.CustomerPhone)) throw new BusinessException(400, "Thông tin khách hàng và số vé không hợp lệ.");
+        // Mirrors the FE booking drawer: strip spaces/dots/dashes, then VN mobile
+        // (10 digits starting 03/05/07/08/09, or +84 + 9 digits). The FE regex has
+        // a stray "|" inside its character class; the server uses the intended form.
+        var phone = (r.CustomerPhone ?? "").Trim().Replace(" ", "").Replace(".", "").Replace("-", "");
+        if (!VnMobileRegex.IsMatch(phone)) throw new BusinessException(400, "Số điện thoại không hợp lệ.");
         var key = r.IdempotencyKey?.Trim();
         if (r.IdempotencyKey is not null && (string.IsNullOrWhiteSpace(key) || key.Length > 100)) throw new BusinessException(400, "Idempotency key không hợp lệ.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
@@ -106,8 +116,18 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
             {
                 if (!string.Equals(match.RequestFingerprint, requestFingerprint, StringComparison.Ordinal)) throw new BusinessException(409, "Idempotency key đã được dùng cho payload khác.");
                 if (match.BookingStatus == "pending" && match.HoldExpiresAt <= DateTime.UtcNow)
+                {
+                    // Expired hold: expire it and fall through to create a fresh hold
+                    // instead of returning the dead booking. Release its idempotency
+                    // key first — (CustomerId, IdempotencyKey) is unique, so the fresh
+                    // hold could not reuse the key otherwise.
                     await ExpirePendingBookingsCoreAsync(ct);
-                await tx.CommitAsync(ct); return await ToDtoAsync(match, ct);
+                    match.IdempotencyKey = null;
+                }
+                else
+                {
+                    await tx.CommitAsync(ct); return await ToDtoAsync(match, ct);
+                }
             }
         }
         await ExpirePendingBookingsCoreAsync(ct);
@@ -134,13 +154,21 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         var expired = new List<WorkshopBooking>();
         foreach (var b in list)
         {
-            if (b.HoldExpiresAt.AddMinutes(10) > now && await db.Payments.AnyAsync(x => x.BookingId == b.Id && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment", ct))
-                continue;
-            var s = await db.WorkshopSessions.FirstOrDefaultAsync(s => s.Id == b.SessionId, ct);
-            if (s is null) throw new BusinessException(409, "Booking tham chiếu ca học không tồn tại.");
-            if (s.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hết hạn booking.");
-            b.BookingStatus = "expired"; s.BookedSlots -= b.TicketCount; SetFullOrOpen(s);
-            expired.Add(b);
+            try
+            {
+                if (b.HoldExpiresAt.AddMinutes(10) > now && await db.Payments.AnyAsync(x => x.BookingId == b.Id && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment", ct))
+                    continue;
+                var s = await db.WorkshopSessions.FirstOrDefaultAsync(s => s.Id == b.SessionId, ct);
+                if (s is null) throw new BusinessException(409, "Booking tham chiếu ca học không tồn tại.");
+                if (s.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hết hạn booking.");
+                b.BookingStatus = "expired"; s.BookedSlots -= b.TicketCount; SetFullOrOpen(s);
+                expired.Add(b);
+            }
+            catch (BusinessException ex)
+            {
+                // One bad row must not abort the whole sweep: log it and keep expiring the rest.
+                logger?.LogWarning(ex, "Bỏ qua booking {BookingId} khi hết hạn hold.", b.Id);
+            }
         }
         if (expired.Count > 0)
         {
@@ -213,7 +241,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
 
         var b = await db.WorkshopBookings.FirstOrDefaultAsync(x => x.Id == bookingId, ct) ?? throw new BusinessException(404, "Không tìm thấy booking.");
 
-        if (!isStaff && b.CustomerId.HasValue && userId != Guid.Empty && b.CustomerId.Value != userId)
+        if (!isStaff && (!b.CustomerId.HasValue || b.CustomerId.Value != userId))
             throw new BusinessException(403, "Bạn không có quyền thanh toán booking của tài khoản khác.");
 
         var s = await db.WorkshopSessions.FirstOrDefaultAsync(x => x.Id == b.SessionId, ct) ?? throw new BusinessException(404, "Không tìm thấy ca học.");
@@ -291,33 +319,18 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
     public async Task RecordPaymentAsync(Guid? bookingId, Guid? orderId, ManualPaymentRequest r, Guid staffId, CancellationToken ct = default)
     {
         var paymentMethod = r.PaymentMethod?.Trim() ?? "";
-        if (staffId == Guid.Empty || (bookingId is null) == (orderId is null) || string.IsNullOrWhiteSpace(r.TransactionCode) || r.TransactionCode.Trim().Length > 100 || !ManualMethods.Contains(paymentMethod, StringComparer.OrdinalIgnoreCase) || r.Amount <= 0 || r.Amount > 1000000000000m || decimal.Round(r.Amount, 2) != r.Amount) throw new BusinessException(400, "Thanh toán thủ công không hợp lệ.");
+        if (staffId == Guid.Empty || bookingId is not null || orderId is null || string.IsNullOrWhiteSpace(r.TransactionCode) || r.TransactionCode.Trim().Length > 100 || !ManualMethods.Contains(paymentMethod, StringComparer.OrdinalIgnoreCase) || r.Amount <= 0 || r.Amount > 1000000000000m || decimal.Round(r.Amount, 2) != r.Amount) throw new BusinessException(400, "Thanh toán thủ công không hợp lệ.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var existing = await db.Payments.FirstOrDefaultAsync(x => x.TransactionCode == r.TransactionCode.Trim(), ct);
-        if (existing != null) { if ((bookingId != null && existing.BookingId == bookingId || orderId != null && existing.OrderId == orderId) && existing.PaymentMethod.Equals(paymentMethod, StringComparison.OrdinalIgnoreCase) && existing.Amount == r.Amount) { await tx.CommitAsync(ct); return; } throw new BusinessException(409, "Mã giao dịch đã được dùng cho dữ liệu khác."); }
-        if (bookingId is not null)
-        {
-            var b = await db.WorkshopBookings.FirstOrDefaultAsync(x => x.Id == bookingId, ct) ?? throw new BusinessException(404, "Không tìm thấy booking.");
-            var s = await db.WorkshopSessions.FirstOrDefaultAsync(x => x.Id == b.SessionId, ct) ?? throw new BusinessException(404, "Không tìm thấy ca học.");
-            var w = await db.Workshops.FirstOrDefaultAsync(x => x.Id == s.WorkshopId, ct) ?? throw new BusinessException(404, "Không tìm thấy workshop.");
-            if (!w.IsActive || s.SessionStatus is "Cancelled" or "Closed" || b.BookingStatus is "expired" or "cancelled" or "attended" or "no_show" || (b.BookingStatus == "pending" && b.HoldExpiresAt <= DateTime.UtcNow) || SessionStartUtc(s) <= DateTime.UtcNow) throw new BusinessException(409, "Booking không còn hiệu lực để thanh toán.");
-            var paid = await PaidAmountAsync(b.Id, ct);
-            ValidateBookingPayment(b, s, paid, r.Amount);
-            var payment = new Payment { BookingId = b.Id, TransactionCode = r.TransactionCode.Trim(), PaymentType = paid == 0 ? "Deposit" : "Remaining", PaymentMethod = paymentMethod, Amount = r.Amount, PaymentStatus = "Paid", PaidAt = DateTime.UtcNow, PaymentGatewayResponse = "Manual staff record" };
-            payment.RecordedBy = staffId; db.Payments.Add(payment);
-            ApplyBookingPayment(b, paid, r.Amount);
-        }
-        else
-        {
-            var o = await db.Orders.FirstOrDefaultAsync(x => x.Id == orderId, ct) ?? throw new BusinessException(404, "Không tìm thấy order.");
-            if (await db.Set<HoaSap.Domain.GatewayPaymentIntent>().AnyAsync(x => x.OrderId == o.Id && (x.Status == "Pending" || x.Status == "Accepted" || x.Status == "Unknown"), ct)) throw new BusinessException(409, "Order đang có giao dịch gateway hoạt động; không thể ghi nhận thanh toán thủ công.");
-            if (o.OrderStatus.Equals("Cancelled", StringComparison.OrdinalIgnoreCase) || o.OrderStatus.Equals("Expired", StringComparison.OrdinalIgnoreCase) || o.PaymentStatus is "Refunded" or "PartiallyRefunded") throw new BusinessException(409, "Order đã hủy, hết hạn hoặc đã hoàn tiền không thể thanh toán.");
-            var amounts = await db.Payments.Where(x => x.OrderId == o.Id && x.PaymentStatus == "Paid").Select(x => x.Amount).ToListAsync(ct); var paid = amounts.Sum(); if (paid + r.Amount > o.TotalAmount) throw new BusinessException(400, "Số tiền thanh toán vượt quá tổng order.");
-            var quotedDeposit = await (from c in db.Set<HoaSap.Domain.Entities.CustomOrderCheckout>() join rev in db.Set<HoaSap.Domain.Entities.CustomQuotationRevision>() on new { c.CustomQuotationId, c.QuotationVersion } equals new { rev.CustomQuotationId, QuotationVersion = rev.Version } where c.OrderId == o.Id select (decimal?)rev.DepositAmount).SingleOrDefaultAsync(ct);
-            if (paid == 0 && quotedDeposit is not null && r.Amount < quotedDeposit.Value) throw new BusinessException(400, "Lần thanh toán đầu phải đủ tiền cọc theo báo giá.");
-            var payment = new Payment { OrderId = o.Id, TransactionCode = r.TransactionCode.Trim(), PaymentType = "Full", PaymentMethod = paymentMethod, Amount = r.Amount, PaymentStatus = "Paid", PaidAt = DateTime.UtcNow, PaymentGatewayResponse = "Manual staff record" };
-            payment.RecordedBy = staffId; db.Payments.Add(payment); o.PaymentStatus = paid + r.Amount >= o.TotalAmount ? "Paid" : "PartiallyPaid";
-        }
+        if (existing != null) { if (existing.OrderId == orderId && existing.PaymentMethod.Equals(paymentMethod, StringComparison.OrdinalIgnoreCase) && existing.Amount == r.Amount) { await tx.CommitAsync(ct); return; } throw new BusinessException(409, "Mã giao dịch đã được dùng cho dữ liệu khác."); }
+        var o = await db.Orders.FirstOrDefaultAsync(x => x.Id == orderId, ct) ?? throw new BusinessException(404, "Không tìm thấy order.");
+        if (await db.Set<HoaSap.Domain.GatewayPaymentIntent>().AnyAsync(x => x.OrderId == o.Id && (x.Status == "Pending" || x.Status == "Accepted" || x.Status == "Unknown"), ct)) throw new BusinessException(409, "Order đang có giao dịch gateway hoạt động; không thể ghi nhận thanh toán thủ công.");
+        if (o.OrderStatus.Equals("Cancelled", StringComparison.OrdinalIgnoreCase) || o.OrderStatus.Equals("Expired", StringComparison.OrdinalIgnoreCase) || o.PaymentStatus is "Refunded" or "PartiallyRefunded") throw new BusinessException(409, "Order đã hủy, hết hạn hoặc đã hoàn tiền không thể thanh toán.");
+        var amounts = await db.Payments.Where(x => x.OrderId == o.Id && x.PaymentStatus == "Paid").Select(x => x.Amount).ToListAsync(ct); var paid = amounts.Sum(); if (paid + r.Amount > o.TotalAmount) throw new BusinessException(400, "Số tiền thanh toán vượt quá tổng order.");
+        var quotedDeposit = await (from c in db.Set<HoaSap.Domain.Entities.CustomOrderCheckout>() join rev in db.Set<HoaSap.Domain.Entities.CustomQuotationRevision>() on new { c.CustomQuotationId, c.QuotationVersion } equals new { rev.CustomQuotationId, QuotationVersion = rev.Version } where c.OrderId == o.Id select (decimal?)rev.DepositAmount).SingleOrDefaultAsync(ct);
+        if (paid == 0 && quotedDeposit is not null && r.Amount < quotedDeposit.Value) throw new BusinessException(400, "Lần thanh toán đầu phải đủ tiền cọc theo báo giá.");
+        var payment = new Payment { OrderId = o.Id, TransactionCode = r.TransactionCode.Trim(), PaymentType = "Full", PaymentMethod = paymentMethod, Amount = r.Amount, PaymentStatus = "Paid", PaidAt = DateTime.UtcNow, PaymentGatewayResponse = "Manual staff record" };
+        payment.RecordedBy = staffId; db.Payments.Add(payment); o.PaymentStatus = paid + r.Amount >= o.TotalAmount ? "Paid" : "PartiallyPaid";
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
     }
 
@@ -330,6 +343,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (s.SessionStatus == "Cancelled") throw new BusinessException(409, "Ca học đã hủy không thể điểm danh.");
         if (b.BookingStatus != "confirmed") throw new BusinessException(409, "Chỉ booking đã xác nhận mới được check-in/no-show.");
         if (noShow && now < end) throw new BusinessException(409, "Chỉ được ghi no-show sau giờ kết thúc ca học.");
+        if (!noShow && now > end) throw new BusinessException(409, "Ca học đã kết thúc, không thể check-in.");
         if (!noShow && now < start.AddMinutes(-60)) throw new BusinessException(409, "Chỉ check-in từ 60 phút trước giờ bắt đầu.");
         if (!noShow && await PaidAmountAsync(id, ct) < b.TotalAmount) throw new BusinessException(409, "Chỉ booking đã thanh toán đủ mới được check-in.");
         if (noShow) b.BookingStatus = "no_show"; else { b.BookingStatus = "attended"; b.CheckedInAt = now; }
@@ -374,7 +388,20 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
             var vn = TimeZoneInfo.ConvertTimeFromUtc(at, VietnamTimeZone);
             throw new BusinessException(409, $"Vé đã check-in lúc {vn:HH:mm dd/MM} (giờ VN).");
         }
-        await CheckInAsync(id, false, ct);
+        try { await CheckInAsync(id, false, ct); }
+        catch (BusinessException ex) when (ex.StatusCode == 409)
+        {
+            // The ticket may have been checked in between the pre-check above and
+            // the write: re-read and report the friendly "already checked in" message.
+            var fresh = await db.WorkshopBookings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (fresh?.BookingStatus == "attended" || fresh?.CheckedInAt is not null)
+            {
+                var at = Utc(fresh!.CheckedInAt ?? DateTime.UtcNow);
+                var vn = TimeZoneInfo.ConvertTimeFromUtc(at, VietnamTimeZone);
+                throw new BusinessException(409, $"Vé đã check-in lúc {vn:HH:mm dd/MM} (giờ VN).");
+            }
+            throw;
+        }
         return await ScanAsync(token, ct);
     }
 
@@ -412,7 +439,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (r.InstructorId is not null && !await db.Instructors.AnyAsync(x => x.Id == r.InstructorId, ct)) throw new BusinessException(400, "Instructor không tồn tại.");
     }
     private static void ValidateWorkshop(WorkshopUpsertDto r) { if (string.IsNullOrWhiteSpace(r.Code) || string.IsNullOrWhiteSpace(r.Name) || r.BasePrice < 0 || r.BasePrice > 1_000_000_000m || decimal.Round(r.BasePrice, 2) != r.BasePrice || r.Duration < 1 || r.Duration > 100_000 || r.MaxCapacity < 1 || r.MaxCapacity > 100_000) throw new BusinessException(400, "Thông tin workshop không hợp lệ."); }
-    private static void ValidateSession(SessionUpsertDto r) { if (r.Capacity is < 1 or > 100000 || r.SessionDate == default || r.StartTime < TimeSpan.Zero || r.EndTime >= TimeSpan.FromDays(1) || r.EndTime <= r.StartTime || string.IsNullOrWhiteSpace(r.Location)) throw new BusinessException(400, "Thông tin ca học không hợp lệ."); }
+    private static void ValidateSession(SessionUpsertDto r) { if (r.Capacity is < 1 or > 100000 || r.SessionDate == default || r.SessionDate.Date < TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, VietnamTimeZone).Date || r.StartTime < TimeSpan.Zero || r.EndTime >= TimeSpan.FromDays(1) || r.EndTime <= r.StartTime || string.IsNullOrWhiteSpace(r.Location)) throw new BusinessException(400, "Thông tin ca học không hợp lệ."); }
     private static void ValidateArrayJson(string? json) { if (string.IsNullOrWhiteSpace(json)) return; try { using var doc = JsonDocument.Parse(json); if (doc.RootElement.ValueKind != JsonValueKind.Array) throw new Exception(); } catch { throw new BusinessException(400, "GoalsJson và IncludesJson phải là JSON array hợp lệ."); } }
     private static string NormalizeArrayJson(string? json) => string.IsNullOrWhiteSpace(json) ? "[]" : json;
     private static WorkshopDto ToDto(Workshop x) => new(x.Id, x.Code, x.Name, x.ShortName, x.Category, x.BasePrice, x.Duration, x.MaxCapacity, x.Description, x.LeadContent, x.GoalsJson, x.IncludesJson, x.ForWho, x.IsFeatured, x.IsActive, x.InstructorId);
@@ -451,7 +478,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (b.BookingStatus == "attended" || b.CheckedInAt is not null) return "Vé đã check-in";
         if (b.BookingStatus == "cancelled") return "Booking đã hủy";
         if (b.BookingStatus == "expired") return "Booking đã hết hạn";
-        if (b.BookingStatus == "no_show") return "Ca học đã kết thúc";
+        if (b.BookingStatus == "no_show") return "Khách không đến";
         if (!fullyPaid || b.BookingStatus != "confirmed") return "Chưa thanh toán đủ";
         if (now > SessionEndUtc(s)) return "Ca học đã kết thúc";
         if (now < SessionStartUtc(s).AddMinutes(-60)) return "Chưa đến giờ check-in";
