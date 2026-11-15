@@ -6,10 +6,11 @@ using HoaSap.BLL;
 using HoaSap.DAL;
 using HoaSap.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace HoaSap.BLL.Workshops;
 
-public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tickets = null)
+public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tickets = null, ILogger<WorkshopService>? logger = null)
 {
     private const decimal DepositRate = 0.30m;
     private static readonly string[] ManualMethods = ["Cash", "BankTransfer", "MoMo"];
@@ -106,8 +107,18 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
             {
                 if (!string.Equals(match.RequestFingerprint, requestFingerprint, StringComparison.Ordinal)) throw new BusinessException(409, "Idempotency key đã được dùng cho payload khác.");
                 if (match.BookingStatus == "pending" && match.HoldExpiresAt <= DateTime.UtcNow)
+                {
+                    // Expired hold: expire it and fall through to create a fresh hold
+                    // instead of returning the dead booking. Release its idempotency
+                    // key first — (CustomerId, IdempotencyKey) is unique, so the fresh
+                    // hold could not reuse the key otherwise.
                     await ExpirePendingBookingsCoreAsync(ct);
-                await tx.CommitAsync(ct); return await ToDtoAsync(match, ct);
+                    match.IdempotencyKey = null;
+                }
+                else
+                {
+                    await tx.CommitAsync(ct); return await ToDtoAsync(match, ct);
+                }
             }
         }
         await ExpirePendingBookingsCoreAsync(ct);
@@ -134,13 +145,21 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         var expired = new List<WorkshopBooking>();
         foreach (var b in list)
         {
-            if (b.HoldExpiresAt.AddMinutes(10) > now && await db.Payments.AnyAsync(x => x.BookingId == b.Id && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment", ct))
-                continue;
-            var s = await db.WorkshopSessions.FirstOrDefaultAsync(s => s.Id == b.SessionId, ct);
-            if (s is null) throw new BusinessException(409, "Booking tham chiếu ca học không tồn tại.");
-            if (s.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hết hạn booking.");
-            b.BookingStatus = "expired"; s.BookedSlots -= b.TicketCount; SetFullOrOpen(s);
-            expired.Add(b);
+            try
+            {
+                if (b.HoldExpiresAt.AddMinutes(10) > now && await db.Payments.AnyAsync(x => x.BookingId == b.Id && x.PaymentMethod == "VNPay" && x.PaymentStatus == "AwaitingPayment", ct))
+                    continue;
+                var s = await db.WorkshopSessions.FirstOrDefaultAsync(s => s.Id == b.SessionId, ct);
+                if (s is null) throw new BusinessException(409, "Booking tham chiếu ca học không tồn tại.");
+                if (s.BookedSlots < b.TicketCount) throw new BusinessException(409, "Số chỗ đã đặt không nhất quán, không thể hết hạn booking.");
+                b.BookingStatus = "expired"; s.BookedSlots -= b.TicketCount; SetFullOrOpen(s);
+                expired.Add(b);
+            }
+            catch (BusinessException ex)
+            {
+                // One bad row must not abort the whole sweep: log it and keep expiring the rest.
+                logger?.LogWarning(ex, "Bỏ qua booking {BookingId} khi hết hạn hold.", b.Id);
+            }
         }
         if (expired.Count > 0)
         {
