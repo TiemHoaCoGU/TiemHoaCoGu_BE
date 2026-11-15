@@ -66,7 +66,19 @@ builder.Services.AddDbContext<HoaSapDbContext>(options =>
 });
 builder.Services.AddScoped<CommerceService>();
 builder.Services.AddScoped<WorkshopService>();
-builder.Services.AddSingleton(sp => { var o = new VnPayOptions(); builder.Configuration.GetSection("Payments:VnPay").Bind(o); return o; });
+// Booking VNPay reuses the commerce gateway's sandbox credentials (Payments:Gateway);
+// there is no separate Payments:VnPay section in appsettings.
+builder.Services.AddSingleton(sp =>
+{
+    var g = builder.Configuration.GetSection("Payments:Gateway");
+    return new VnPayOptions
+    {
+        TmnCode = g["VnPayTmnCode"] ?? "",
+        HashSecret = g["VnPayHashSecret"] ?? "",
+        PayUrl = g["VnPayBaseUrl"] ?? "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html",
+        ApiUrl = g["VnPayApiUrl"] ?? "https://sandbox.vnpayment.vn/merchant_webapi/api/transaction"
+    };
+});
 builder.Services.AddHttpClient<VnPayClient>(client => client.DefaultRequestHeaders.UserAgent.ParseAdd("HoaSap/1.0")).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<VnPayBookingService>();
 builder.Services.AddScoped<RefundService>();
