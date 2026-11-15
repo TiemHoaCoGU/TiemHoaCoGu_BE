@@ -269,7 +269,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         var order = await db.Orders.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == orderId && x.CustomerId == customerId, ct) ?? throw NF("Không tìm thấy đơn");
         if (order.OrderStatus is "Cancelled" or "Expired") return;
         if (order.PaymentStatus != "Unpaid") throw Conflict("Đơn đã có khoản thanh toán; cần quy trình hoàn tiền trước khi hủy");
-        if (order.OrderStatus is "Delivering" or "Completed") throw Conflict("Đơn đã giao, không thể hủy");
+        if (order.OrderStatus is "Completed") throw Conflict("Đơn đã giao, không thể hủy");
         if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled" && x.DeliveryStatus != "Returned", ct)) throw Conflict("Đơn có giao hàng đang xử lý, không thể hủy");
         if (!await IsCustomOrderAsync(order.Id, ct)) await ReleaseReservedAsync(order.Items, ct); await RestoreVoucherAsync(order, ct); order.OrderStatus = "Cancelled"; await SetCustomStatusAsync(order.Id, "Cancelled", ct); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
     }
@@ -431,8 +431,8 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
     {
         status = status?.Trim() ?? ""; await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct); var delivery = await db.Deliveries.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == deliveryId && x.OrderId == orderId, ct) ?? throw NF("Không tìm thấy giao hàng");
         if (delivery.DeliveryStatus == status) { await tx.RollbackAsync(ct); return ToDto(delivery); }
-        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Shipped", "Failed") and not ("Failed", "Shipped") and not ("Shipped", "Returned") and not ("Failed", "Returned") and not ("Preparing", "Cancelled")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
-        delivery.DeliveryStatus = status; if (status == "Shipped") delivery.ShippedAt ??= DateTime.UtcNow; if (status == "Delivered") delivery.DeliveredAt ??= DateTime.UtcNow;
+        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Shipped", "Failed") and not ("Failed", "Shipped") and not ("Shipped", "Returned") and not ("Failed", "Returned") and not ("Preparing", "Cancelled") and not ("Delivered", "Returned") and not ("Preparing", "Failed")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
+        delivery.DeliveryStatus = status; if (status == "Shipped") delivery.ShippedAt = DateTime.UtcNow; if (status == "Delivered") delivery.DeliveredAt ??= DateTime.UtcNow;
         if (status == "Cancelled" && !string.IsNullOrWhiteSpace(delivery.TrackingNumber) && carrier is not null and not DisabledCarrier)
         {
             try { await carrier.CancelShipmentAsync(delivery.TrackingNumber, ct); } catch { /* Non-blocking remote cancel */ }
