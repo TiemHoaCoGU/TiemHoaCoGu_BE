@@ -12,9 +12,9 @@ public sealed class BookingsController(WorkshopService service, VnPayBookingServ
     [HttpPost("sessions/{sessionId:guid}"), Authorize] public Task<BookingDto> Hold(Guid sessionId, BookingRequest r, CancellationToken ct) => service.HoldBookingAsync(sessionId, r, UserId, ct);
     [HttpGet][Authorize] public Task<IReadOnlyList<BookingDto>> Mine(CancellationToken ct) => service.MyBookingsAsync(UserId ?? throw new HoaSap.BLL.BusinessException(401, "Yêu cầu đăng nhập."), ct);
     [HttpGet("{id:guid}")][Authorize] public Task<BookingDto> Get(Guid id, CancellationToken ct) => service.BookingAsync(id, UserId, Staff, ct);
-    [HttpPost("{id:guid}/vnpay")][Authorize] public Task<VnPayCheckoutDto> VnPayStart(Guid id, CancellationToken ct) => vnPay.StartAsync(id, UserId, ct);
+    [HttpPost("{id:guid}/vnpay")][Authorize] public Task<VnPayCheckoutDto> VnPayStart(Guid id, CancellationToken ct) => vnPay.StartAsync(id, UserId, HttpContext.Connection.RemoteIpAddress?.ToString(), ct);
     [HttpPost("{id:guid}/vnpay/return")][Authorize] public Task<VnPaySyncDto> VnPayReturn(Guid id, VnPayReturnRequest r, CancellationToken ct) => vnPay.ReturnAsync(id, UserId, Staff, r.Query, ct);
-    [HttpPost("{id:guid}/vnpay/sync")][Authorize] public Task<VnPaySyncDto> VnPaySync(Guid id, CancellationToken ct) => vnPay.SyncBookingAsync(id, UserId, Staff, ct);
+    [HttpPost("{id:guid}/vnpay/sync")][Authorize] public Task<VnPaySyncDto> VnPaySync(Guid id, CancellationToken ct) => vnPay.SyncBookingAsync(id, UserId, Staff, HttpContext.Connection.RemoteIpAddress?.ToString(), ct);
     [HttpGet("{id:guid}/ticket")][Authorize] public Task<TicketDto> Ticket(Guid id, CancellationToken ct) => service.TicketAsync(id, UserId, Staff, ct);
     [HttpGet("tickets/{token}"), Authorize(Roles = "Admin,Staff")] public Task<TicketScanDto> Scan(string token, CancellationToken ct) => service.ScanAsync(token, ct);
     [HttpPost("tickets/{token}/check-in"), Authorize(Roles = "Admin,Staff")] public Task<TicketScanDto> CheckInByToken(string token, CancellationToken ct) => service.CheckInByTokenAsync(token, ct);

@@ -4,24 +4,23 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using HoaSap.DAL;
 using HoaSap.Domain.Entities;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace HoaSap.BLL.Workshops;
 
-public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, IConfiguration config, ILogger<VnPayBookingService> logger, IHttpContextAccessor httpContext)
+public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, IConfiguration config, ILogger<VnPayBookingService> logger)
 {
     private static readonly TimeZoneInfo VietnamTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
     private const string Method = "VNPay";
     private string PublicUrl => (config["Site:PublicUrl"] ?? "http://localhost:3000").Trim().TrimEnd('/');
-    private string ClientIp => httpContext.HttpContext?.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
 
-    public async Task<VnPayCheckoutDto> StartAsync(Guid bookingId, Guid? customerId, CancellationToken ct = default)
+    public async Task<VnPayCheckoutDto> StartAsync(Guid bookingId, Guid? customerId, string? clientIp = null, CancellationToken ct = default)
     {
         if (!vnPay.Enabled) throw new BusinessException(503, "Chưa bật thanh toán VNPAY.");
         if (customerId is null || customerId == Guid.Empty) throw new BusinessException(401, "Yêu cầu đăng nhập.");
+        clientIp = string.IsNullOrWhiteSpace(clientIp) ? "127.0.0.1" : clientIp;
 
         string txnRef = ""; int amount = 0; DateTime hold = default; DateTime created = default; string orderInfo = ""; string createDate = ""; Guid paymentId = Guid.Empty;
         await using (var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct))
@@ -75,7 +74,7 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
         var ret = $"{PublicUrl}/thanh-toan?bookingId={bookingId}";
         try
         {
-            var url = vnPay.BuildPaymentUrl(txnRef, amount, orderInfo, ret, ClientIp, created, hold);
+            var url = vnPay.BuildPaymentUrl(txnRef, amount, orderInfo, ret, clientIp, created, hold);
             var payment = await db.Payments.FirstAsync(x => x.Id == paymentId, ct);
             payment.PaymentGatewayResponse = JsonSerializer.Serialize(new { txnRef, createDate, orderInfo, paymentUrl = url, expiresAtUtc = hold, amount });
             await db.SaveChangesAsync(ct);
@@ -132,11 +131,11 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
         }
     }
 
-    public async Task<VnPaySyncDto> SyncBookingAsync(Guid bookingId, Guid? userId, bool staff, CancellationToken ct = default)
+    public async Task<VnPaySyncDto> SyncBookingAsync(Guid bookingId, Guid? userId, bool staff, string? clientIp = null, CancellationToken ct = default)
     {
         await EnsureAccessAsync(bookingId, userId, staff, ct);
         var awaiting = await db.Payments.AsNoTracking().Where(x => x.BookingId == bookingId && x.PaymentMethod == Method && x.PaymentStatus == "AwaitingPayment").Select(x => x.Id).ToListAsync(ct);
-        foreach (var id in awaiting) await QueryAndApplyAsync(id, ct);
+        foreach (var id in awaiting) await QueryAndApplyAsync(id, clientIp, ct);
         return await SyncSnapshotAsync(bookingId, ct);
     }
 
@@ -154,21 +153,21 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
         }
         foreach (var id in ids)
         {
-            try { await QueryAndApplyAsync(id, ct); }
+            try { await QueryAndApplyAsync(id, null, ct); }
             catch (Exception ex) when (!ct.IsCancellationRequested) { logger.LogWarning(ex, "VNPAY poll sync failed for payment {PaymentId}", id); }
         }
     }
 
     private enum ApplyOutcome { Confirmed, AlreadyConfirmed, Canceled, Reconciliation, Ignored }
 
-    private async Task<ApplyOutcome> QueryAndApplyAsync(Guid paymentId, CancellationToken ct)
+    private async Task<ApplyOutcome> QueryAndApplyAsync(Guid paymentId, string? clientIp, CancellationToken ct)
     {
         var snap = await db.Payments.AsNoTracking().Where(x => x.Id == paymentId).Select(x => new { x.TransactionCode, x.PaymentGatewayResponse }).FirstOrDefaultAsync(ct);
         if (snap is null || !snap.TransactionCode.StartsWith("VNP-", StringComparison.Ordinal)) return ApplyOutcome.Ignored;
         var info = ReadInfo(snap.PaymentGatewayResponse);
         if (info is null || string.IsNullOrWhiteSpace(info.CreateDate) || string.IsNullOrWhiteSpace(info.OrderInfo)) return ApplyOutcome.Ignored;
         VnPayQueryResult qr;
-        try { qr = await vnPay.QueryAsync(info.TxnRef, info.CreateDate, info.OrderInfo, ClientIp, ct); }
+        try { qr = await vnPay.QueryAsync(info.TxnRef, info.CreateDate, info.OrderInfo, string.IsNullOrWhiteSpace(clientIp) ? "127.0.0.1" : clientIp, ct); }
         catch (Exception ex) when (ex is VnPayException or HttpRequestException or TaskCanceledException) { logger.LogWarning(ex, "VNPAY query failed for {TransactionCode}", snap.TransactionCode); return ApplyOutcome.Ignored; }
         if (!qr.HasSecureHash || (qr.ResponseCode != "00" && qr.ResponseCode != "91"))
         {
