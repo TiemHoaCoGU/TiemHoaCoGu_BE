@@ -269,7 +269,7 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         var order = await db.Orders.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == orderId && x.CustomerId == customerId, ct) ?? throw NF("Không tìm thấy đơn");
         if (order.OrderStatus is "Cancelled" or "Expired") return;
         if (order.PaymentStatus != "Unpaid") throw Conflict("Đơn đã có khoản thanh toán; cần quy trình hoàn tiền trước khi hủy");
-        if (order.OrderStatus is "Delivering" or "Completed") throw Conflict("Đơn đã giao, không thể hủy");
+        if (order.OrderStatus is "Completed") throw Conflict("Đơn đã giao, không thể hủy");
         if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled" && x.DeliveryStatus != "Returned", ct)) throw Conflict("Đơn có giao hàng đang xử lý, không thể hủy");
         if (!await IsCustomOrderAsync(order.Id, ct)) await ReleaseReservedAsync(order.Items, ct); await RestoreVoucherAsync(order, ct); order.OrderStatus = "Cancelled"; await SetCustomStatusAsync(order.Id, "Cancelled", ct); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
     }
@@ -350,6 +350,9 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         }
         var delivery = new Delivery { Id = Guid.NewGuid(), OrderId = orderId, DeliveryCode = $"DEL-{Guid.NewGuid():N}", ShipperUnit = request.ShipperUnit ?? "", TrackingNumber = request.TrackingNumber ?? "", DeliveryStatus = "Preparing" };
         foreach (var requested in grouped) { var line = order.Items.SingleOrDefault(i => i.Id == requested.OrderItemId) ?? throw Bad("OrderItem không thuộc đơn"); var used = await db.DeliveryItems.Where(y => y.OrderItemId == line.Id).Where(y => db.Deliveries.Any(d => d.Id == y.DeliveryId && d.DeliveryStatus != "Cancelled" && d.DeliveryStatus != "Returned")).SumAsync(y => (int?)y.ShippedQuantity, ct) ?? 0; if (requested.Quantity > line.Quantity - used) throw Conflict("Vượt quá lượng chưa giao"); delivery.Items.Add(new DeliveryItem { Id = Guid.NewGuid(), DeliveryId = delivery.Id, OrderItemId = line.Id, ShippedQuantity = requested.Quantity }); }
+        // Tracking number of the GHN order created by this call, if any: if saving the
+        // delivery below fails, the GHN order must be cancelled back so it is not orphaned.
+        var ghnTracking = "";
         if (string.IsNullOrWhiteSpace(delivery.TrackingNumber) && carrier is not null and not DisabledCarrier)
         {
             try
@@ -388,26 +391,48 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
                     }
                 }
                 var shipWeightKg = Math.Max(0.1m, totalGrams / 1000m);
-                var codAmount = order.PaymentStatus == "Paid" ? 0m : delivery.Items.Sum(x => (orderItems.FirstOrDefault(i => i.Id == x.OrderItemId)?.FinalPrice ?? 0m) * x.ShippedQuantity);
-                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, null, null, shipWeightKg, Math.Max(1, maxLengthCm), Math.Max(1, maxWidthCm), Math.Max(1, totalHeightCm), codAmount, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems, order.ShippingWardName, order.ShippingProvinceName), ct);
+                // COD collects the order's remaining balance, prorated by this delivery's
+                // share of the goods value: TotalAmount already includes the shipping fee
+                // and subtracts the voucher discount, and deposits / partial payments are
+                // recorded in Payments. Collecting the raw goods sum overcharges every
+                // order with a voucher and every custom order (deposit already paid).
+                var deliveredGoods = delivery.Items.Sum(x => (orderItems.FirstOrDefault(i => i.Id == x.OrderItemId)?.FinalPrice ?? 0m) * x.ShippedQuantity);
+                var paid = (await db.Payments.Where(x => x.OrderId == order.Id && x.PaymentStatus == "Paid").Select(x => x.Amount).ToListAsync(ct)).Sum();
+                var remaining = Math.Max(0m, order.TotalAmount - paid);
+                var share = order.SubTotal > 0 ? deliveredGoods / order.SubTotal : (deliveredGoods > 0 ? 1m : 0m);
+                var codAmount = Math.Round(remaining * share, 0, MidpointRounding.AwayFromZero);
+                var shipRes = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(order.OrderCode, delivery.DeliveryCode, recName, recPhone, recAddress, shipWeightKg, Math.Max(1, maxLengthCm), Math.Max(1, maxWidthCm), Math.Max(1, totalHeightCm), codAmount, "Tiệm Hoa Cô Gu - Giao hoa cẩn thận", shipmentItems, order.ShippingWardName, order.ShippingProvinceName), ct);
                 if (!shipRes.Accepted || string.IsNullOrWhiteSpace(shipRes.TrackingNumber))
                     throw new BusinessException(502, shipRes.ErrorMessage ?? "GHN không trả về mã vận đơn; chưa tạo phiếu giao.");
                 delivery.TrackingNumber = shipRes.TrackingNumber;
+                ghnTracking = shipRes.TrackingNumber;
                 if (string.IsNullOrWhiteSpace(delivery.ShipperUnit)) delivery.ShipperUnit = "GHN";
                 delivery.ShippingCost = shipRes.ShippingFee;
             }
             catch (BusinessException) { throw; }
             catch (Exception ex) { throw new BusinessException(502, $"Không tạo được vận đơn GHN: {ex.Message}"); }
         }
-        db.Deliveries.Add(delivery); await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct); return ToDto(delivery);
+        db.Deliveries.Add(delivery);
+        try { await db.SaveChangesAsync(ct); await transaction.CommitAsync(ct); }
+        catch
+        {
+            // The GHN order already exists but its local delivery is gone: cancel it back
+            // instead of leaving an untracked COD shipment running at the carrier.
+            if (!string.IsNullOrWhiteSpace(ghnTracking) && carrier is not null and not DisabledCarrier)
+            {
+                try { await carrier.CancelShipmentAsync(ghnTracking, ct); } catch { /* Best-effort compensation */ }
+            }
+            throw;
+        }
+        return ToDto(delivery);
     }
 
     public async Task<DeliveryDto> TransitionDeliveryAsync(Guid orderId, Guid deliveryId, string status, CancellationToken ct = default)
     {
         status = status?.Trim() ?? ""; await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct); var delivery = await db.Deliveries.Include(x => x.Items).SingleOrDefaultAsync(x => x.Id == deliveryId && x.OrderId == orderId, ct) ?? throw NF("Không tìm thấy giao hàng");
         if (delivery.DeliveryStatus == status) { await tx.RollbackAsync(ct); return ToDto(delivery); }
-        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Shipped", "Failed") and not ("Failed", "Shipped") and not ("Shipped", "Returned") and not ("Failed", "Returned") and not ("Preparing", "Cancelled")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
-        delivery.DeliveryStatus = status; if (status == "Shipped") delivery.ShippedAt ??= DateTime.UtcNow; if (status == "Delivered") delivery.DeliveredAt ??= DateTime.UtcNow;
+        if ((delivery.DeliveryStatus, status) is not ("Preparing", "Shipped") and not ("Shipped", "Delivered") and not ("Shipped", "Failed") and not ("Failed", "Shipped") and not ("Shipped", "Returned") and not ("Failed", "Returned") and not ("Preparing", "Cancelled") and not ("Delivered", "Returned") and not ("Preparing", "Failed")) throw Conflict("Chuyển trạng thái giao hàng không hợp lệ");
+        delivery.DeliveryStatus = status; if (status == "Shipped") delivery.ShippedAt = DateTime.UtcNow; if (status == "Delivered") delivery.DeliveredAt ??= DateTime.UtcNow;
         if (status == "Cancelled" && !string.IsNullOrWhiteSpace(delivery.TrackingNumber) && carrier is not null and not DisabledCarrier)
         {
             try { await carrier.CancelShipmentAsync(delivery.TrackingNumber, ct); } catch { /* Non-blocking remote cancel */ }

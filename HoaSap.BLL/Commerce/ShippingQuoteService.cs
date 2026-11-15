@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using HoaSap.DAL;
 using HoaSap.Domain;
 using HoaSap.Domain.Entities;
@@ -55,12 +56,12 @@ public sealed class ShippingQuoteService(HoaSapDbContext db, ICarrierAdapter car
             return new CarrierShipmentItem(product.Name, product.Code, x.Quantity, product.Price, product.ShippingWeightGrams ?? 500,
                 (int?)product.PackageLengthCm, (int?)product.PackageWidthCm, (int?)product.PackageHeightCm);
         }).ToList();
-        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight, request.ProvinceId, request.WardId,
+        var rateRequest = new CarrierRateRequest(origin, destination, weight, maxLength, maxWidth, totalHeight,
             ToName: customer?.FullName, ToPhone: customer?.PhoneNumber, ToWardName: request.WardName.Trim(), ToProvinceName: request.ProvinceName.Trim(), Items: rateItems);
         try { result = await carrier.QuoteAsync(rateRequest, ct); }
         catch (InvalidOperationException) when (carrier is DisabledCarrier) { throw new BusinessException(503, "Nhà vận chuyển chưa được cấu hình; không tạo báo giá."); }
         catch (InvalidOperationException ex) { throw new BusinessException(502, ex.Message); }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { throw new BusinessException(502, "Không kết nối được GHN staging; chưa tạo báo giá."); }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException) { throw new BusinessException(502, "Không kết nối được GHN staging; chưa tạo báo giá."); }
         if (!result.Accepted || result.Amount < 0 || result.Amount > 1_000_000_000m || decimal.Round(result.Amount, 2) != result.Amount) throw new BusinessException(400, "Nhà vận chuyển không cung cấp báo giá hợp lệ.");
         var lifetime = cfg.QuoteLifetimeMinutes is >= 1 and <= 1440 ? cfg.QuoteLifetimeMinutes : 15;
         var quote = new ShippingQuote { CustomerId = customerId, Origin = origin, Destination = destination, ProvinceId = request.ProvinceId, ProvinceName = request.ProvinceName.Trim(), WardId = request.WardId, WardName = request.WardName.Trim(), Weight = weight, CartFingerprint = Fingerprint(snapshot), Amount = result.Amount, TrackingNumber = result.TrackingNumber, ExpiresAt = DateTime.UtcNow.AddMinutes(lifetime) };

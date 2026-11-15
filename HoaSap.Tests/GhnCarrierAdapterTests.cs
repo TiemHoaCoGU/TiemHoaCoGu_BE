@@ -55,7 +55,7 @@ public sealed class GhnCarrierAdapterTests
         var result = await carrier.QuoteAsync(new CarrierRateRequest(
             "72 Lê Thánh Tôn, Bến Nghé, Quận 1, Hồ Chí Minh",
             "42 Test Street, Phường Bến Nghé, Hồ Chí Minh",
-            0.6m, 25, 20, 8, 1000001, 1003580,
+            0.6m, 25, 20, 8,
             ToName: "Tran Minh Anh", ToPhone: "0987654321",
             ToWardName: "Phường Bến Nghé", ToProvinceName: "Hồ Chí Minh",
             Items: [new CarrierShipmentItem("Hoa hồng", "SP-01", 2, 142_500m, 300, 25, 20, 8)]));
@@ -119,7 +119,7 @@ public sealed class GhnCarrierAdapterTests
 
         var result = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(
             "ORD-20261113-ABC", "DEL-abc", "Tran Minh Anh", "0987654321",
-            "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", null, null, 0.6m, 25, 20, 8, 285_000m,
+            "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", 0.6m, 25, 20, 8, 285_000m,
             "Giao giờ hành chính",
             [new CarrierShipmentItem("Hoa hồng", "SP-01", 2, 142_500m, 300, 25, 20, 8)],
             "Phường Bến Nghé", "Hồ Chí Minh"));
@@ -152,7 +152,7 @@ public sealed class GhnCarrierAdapterTests
         var carrier = CreateAdapter(handler);
 
         var error = await Assert.ThrowsAsync<BusinessException>(() => carrier.CreateShipmentAsync(new CarrierShipmentRequest(
-            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street", null, null, 0.6m, null, null, null, 0, "", [])));
+            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street", 0.6m, null, null, null, 0, "", [])));
 
         Assert.Equal(409, error.StatusCode);
         Assert.Contains("phường/tỉnh", error.Message);
@@ -167,14 +167,14 @@ public sealed class GhnCarrierAdapterTests
         var carrier = CreateAdapter(handler);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => carrier.CreateShipmentAsync(new CarrierShipmentRequest(
-            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", null, null, 0.6m, null, null, null, 0, "",
+            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", 0.6m, null, null, null, 0, "",
             [], "Phường Bến Nghé", "Hồ Chí Minh")));
 
         Assert.Contains("ORDER_INFO_INVALID", error.Message);
     }
 
     [Fact]
-    public async Task Tracking_uses_get_detail_and_reads_updated_date()
+    public async Task Tracking_uses_post_detail_and_reads_updated_date()
     {
         var handler = new StubHandler();
         handler.Responses.Enqueue((HttpStatusCode.OK, "{\"code\":200,\"message\":\"Success\",\"data\":{\"status\":\"delivering\",\"updated_date\":\"2026-07-15T04:49:47.811Z\"}}"));
@@ -190,9 +190,9 @@ public sealed class GhnCarrierAdapterTests
         Assert.Equal("delivering", single.Status);
         Assert.Equal("Đang giao hàng", single.Description);
         var request = Assert.Single(handler.Requests);
-        Assert.Equal(HttpMethod.Get, request.Method);
-        Assert.Equal("https://dev-online-gateway.ghn.vn/shiip/public-api/v2/shipping-order/detail?order_code=LADH94", request.Uri.ToString());
-        Assert.Null(request.Body);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://dev-online-gateway.ghn.vn/shiip/public-api/v2/shipping-order/detail", request.Uri.ToString());
+        Assert.Equal("LADH94", Payload(request).GetProperty("order_code").GetString());
     }
 
     [Fact]
@@ -255,7 +255,7 @@ public sealed class GhnCarrierAdapterTests
         var quote = await carrier.QuoteAsync(new CarrierRateRequest(
             "72 Lê Thánh Tôn, Bến Nghé, Quận 1, Hồ Chí Minh", "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", 1.5m));
         var shipment = await carrier.CreateShipmentAsync(new CarrierShipmentRequest(
-            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", null, null, 1.5m, null, null, null, 0, "", []));
+            "ORD-1", "DEL-1", "Receiver", "0987654321", "42 Test Street, Phường Bến Nghé, Hồ Chí Minh", 1.5m, null, null, null, 0, "", []));
 
         Assert.Equal(22_000m, quote.Amount);
         Assert.StartsWith("GHN", shipment.TrackingNumber);

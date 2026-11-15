@@ -16,7 +16,20 @@ public sealed class ApiFixture : WebApplicationFactory<Program>
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"hoasap-tests-{Guid.NewGuid():N}.db");
     private readonly int _authPermitLimit;
     public ApiFixture() : this(1000) { }
-    internal ApiFixture(int authPermitLimit) => _authPermitLimit = authPermitLimit;
+    internal ApiFixture(int authPermitLimit)
+    {
+        _authPermitLimit = authPermitLimit;
+        // Tests replace the real GHN adapter/catalog with synthetics (see
+        // ConfigureTestServices below), so the app under test must run in
+        // emulation mode: Program.cs refuses to start a GhnSandbox/
+        // GhnStaging app without a real GHN Token + ShopId when emulation
+        // is off, which fails every ApiFixture test in CI where no token
+        // exists. An env var (not the in-memory config below) because
+        // CreateBuilder reads env vars, while the in-memory overrides are
+        // only applied at Build time — after the top-level guard in
+        // Program.cs has already run.
+        Environment.SetEnvironmentVariable("Shipping__Carrier__SandboxEmulation", "true");
+    }
     public const string AdminEmail = "qa-admin@example.test";
     public const string AdminPassword = "A-very-long-test-password-123!";
     public const string TestJwtKey = "qa-only-key-with-at-least-32-bytes-123456";

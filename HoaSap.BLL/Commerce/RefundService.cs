@@ -56,7 +56,7 @@ public sealed class RefundService(HoaSapDbContext db)
             ?? throw new BusinessException(404, "Không tìm thấy order.");
         if (order.OrderStatus is not ("Cancelled" or "Expired" or "Confirmed" or "Processing"))
             throw new BusinessException(409, "Order đã giao hoặc không còn đủ điều kiện hoàn tiền.");
-        if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled", ct))
+        if (await db.Deliveries.AnyAsync(x => x.OrderId == orderId && x.DeliveryStatus != "Cancelled" && x.DeliveryStatus != "Returned", ct))
             throw new BusinessException(409, "Order đã có giao hàng đang xử lý, không thể hoàn tiền.");
         if (order.PaymentStatus is not ("Paid" or "PartiallyPaid" or "PartiallyRefunded"))
             throw new BusinessException(409, "Order chưa có khoản thanh toán được ghi nhận.");
