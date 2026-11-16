@@ -8,6 +8,7 @@ namespace HoaSap.API.Controllers;
 [ApiController, Route("api/vnpay")]
 public sealed class VnPayController(VnPayBookingService vnPay) : ControllerBase
 {
+    // VNPay gọi trực tiếp URL này. Chữ ký do service xác thực thay cho phiên đăng nhập web.
     [HttpGet("ipn")]
     [AllowAnonymous]
     public async Task<IActionResult> Ipn(CancellationToken ct)

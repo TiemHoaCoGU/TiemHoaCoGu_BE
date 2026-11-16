@@ -38,6 +38,7 @@ public sealed class VnPayClient
     public bool Enabled => options.Enabled;
     public string TmnCode => options.TmnCode;
 
+    // Ghép dữ liệu giao dịch, đổi số tiền sang đơn vị VNPay và ký URL bằng khóa phía server.
     public string BuildPaymentUrl(string txnRef, int amountVnd, string orderInfo, string returnUrl, string ipAddr, DateTime createUtc, DateTime expireUtc)
     {
         var p = new SortedDictionary<string, string>(StringComparer.Ordinal)
@@ -60,6 +61,7 @@ public sealed class VnPayClient
         return $"{options.PayUrl}?{query}&vnp_SecureHash={Sign(query)}";
     }
 
+    // Tính lại chữ ký từ dữ liệu trả về để phát hiện query bị sửa trước khi xử lý tiền.
     public bool VerifyReturn(IEnumerable<KeyValuePair<string, string>> query, out VnPayResult result)
     {
         var all = query.Where(x => !string.IsNullOrEmpty(x.Key)).ToDictionary(x => x.Key, x => x.Value ?? "", StringComparer.Ordinal);

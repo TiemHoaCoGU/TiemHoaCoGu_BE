@@ -50,6 +50,7 @@ public sealed class BouquetCatalog
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var total = 0;
         var flowers = 0;
+        // Chụp tên, màu, số lượng và giá dự kiến từ catalog server để giữ đúng dữ liệu lúc gửi.
         long estimate = (long)LaborPrice + wrap.Price;
         foreach (var line in input.Lines.OrderBy(line => line?.Id, StringComparer.Ordinal))
         {

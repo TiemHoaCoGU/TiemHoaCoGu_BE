@@ -37,6 +37,7 @@ public sealed class WorkshopTicketCodec
         Span<byte> bytes = stackalloc byte[TokenBytes];
         Span<byte> hash = stackalloc byte[32];
         id.TryWriteBytes(bytes[..IdBytes]);
+        // Token chứa booking ID và chữ ký rút gọn để phát hiện sửa mã trên QR.
         HMACSHA256.HashData(key, bytes[..IdBytes], hash);
         hash[..MacBytes].CopyTo(bytes[IdBytes..]);
         return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');

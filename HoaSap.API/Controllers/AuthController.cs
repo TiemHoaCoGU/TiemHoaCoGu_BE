@@ -30,6 +30,7 @@ public sealed class AuthController(HoaSapDbContext db, IConfiguration config, ID
     }
 
     [HttpPost("login"), AllowAnonymous]
+    // Đọc Customers theo email, kiểm mật khẩu với bản băm rồi mới cấp phiên.
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken ct)
     {
         var email = request.Email.Trim().ToLowerInvariant(); var user = await db.Customers.SingleOrDefaultAsync(x => x.Email == email && !x.IsGuest && x.IsActive, ct);
@@ -93,6 +94,7 @@ public sealed class AuthController(HoaSapDbContext db, IConfiguration config, ID
     [HttpGet("me"), Authorize]
     public async Task<IActionResult> Me(CancellationToken ct) { if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id)) return Unauthorized(); var u = await db.Customers.AsNoTracking().Where(x => x.Id == id && x.IsActive && !x.IsGuest).SingleOrDefaultAsync(ct); return u is null ? NotFound() : Ok(UserDto(u)); }
 
+    // SQL lưu bản băm của refresh token. Access token JWT được ký và trả về cho BFF.
     private async Task<object> IssueAsync(Customer user, CancellationToken ct) { var plain = TokenService.NewOpaqueToken(); db.Set<RefreshToken>().Add(new RefreshToken { CustomerId = user.Id, FamilyId = Guid.NewGuid(), TokenHash = TokenService.Hash(plain), ExpiresAtUtc = DateTime.UtcNow.AddDays(config.GetValue("Jwt:RefreshExpirationDays", 30)) }); await db.SaveChangesAsync(ct); var access = TokenService.AccessToken(user, config, out var expires); return new { accessToken = access, refreshToken = plain, expiresAt = expires, user = UserDto(user) }; }
     private static object UserDto(Customer x) => new { x.Id, x.FullName, x.Email, x.PhoneNumber, x.Role };
 }

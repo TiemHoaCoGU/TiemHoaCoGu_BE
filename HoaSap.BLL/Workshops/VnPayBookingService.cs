@@ -35,6 +35,7 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
             if (b.BookingStatus is not ("pending" or "confirmed")) throw new BusinessException(409, "Booking không còn ở trạng thái chờ thanh toán.");
 
             var paid = await PaidAmountAsync(b.Id, ct);
+            // VNPay thu toàn bộ số dư backend tính từ sổ thanh toán của booking.
             var remaining = decimal.Round(Math.Max(0, b.TotalAmount - paid), 0);
             if (remaining < 5000 || remaining > 1_000_000_000) throw new BusinessException(400, "Số tiền thanh toán VNPAY không hợp lệ.");
             amount = (int)remaining;
@@ -89,6 +90,7 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
         }
     }
 
+    // Browser chuyển kết quả về. Backend kiểm owner, chữ ký, mã merchant và giao dịch ứng với booking.
     public async Task<VnPaySyncDto> ReturnAsync(Guid bookingId, Guid? userId, bool staff, string? rawQuery, CancellationToken ct = default)
     {
         await EnsureAccessAsync(bookingId, userId, staff, ct);
@@ -180,6 +182,7 @@ public sealed class VnPayBookingService(HoaSapDbContext db, VnPayClient vnPay, I
         return await ApplyResultAsync(paymentId, result, ct);
     }
 
+    // Return, IPN và tra cứu gọi chung sau khi xác thực kết quả. Transaction giữ Payment và Booking đồng bộ.
     private async Task<ApplyOutcome> ApplyResultAsync(Guid paymentId, VnPayResult result, CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);

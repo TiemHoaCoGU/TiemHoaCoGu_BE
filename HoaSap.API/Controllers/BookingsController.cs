@@ -9,6 +9,7 @@ public sealed class BookingsController(WorkshopService service, VnPayBookingServ
 {
     private Guid? UserId => Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : null;
     private bool Staff => User.IsInRole("Admin") || User.IsInRole("Staff");
+    // ID chủ booking lấy từ JWT đã xác thực. Body chỉ gửi thông tin của lượt đặt.
     [HttpPost("sessions/{sessionId:guid}"), Authorize] public Task<BookingDto> Hold(Guid sessionId, BookingRequest r, CancellationToken ct) => service.HoldBookingAsync(sessionId, r, UserId, ct);
     [HttpGet][Authorize] public Task<IReadOnlyList<BookingDto>> Mine(CancellationToken ct) => service.MyBookingsAsync(UserId ?? throw new HoaSap.BLL.BusinessException(401, "Yêu cầu đăng nhập."), ct);
     [HttpGet("{id:guid}")][Authorize] public Task<BookingDto> Get(Guid id, CancellationToken ct) => service.BookingAsync(id, UserId, Staff, ct);

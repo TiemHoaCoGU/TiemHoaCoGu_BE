@@ -55,6 +55,7 @@ public static class NotificationOutboxStaging
                 sessionEndUtc = session is null ? (DateTime?)null : SessionEndUtc(session),
                 location = session?.Location ?? ""
             });
+            // Chỉ xếp email khi booking vừa đủ điều kiện phát vé, kể cả lúc status vẫn là confirmed.
             if (issued && !wasIssued)
                 Add(tracker, "WorkshopTicketIssued", booking.CustomerId, NotificationChannel.Email, bookingEmail, payload, existing, $"Vé của bạn: {workshop?.Name}");
             if (cancelled)

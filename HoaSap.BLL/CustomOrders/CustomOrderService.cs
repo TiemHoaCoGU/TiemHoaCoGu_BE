@@ -179,6 +179,7 @@ public sealed class CustomOrderService(HoaSapDbContext db, IGhnStagingAddressCat
         if (completion <= now || expiry <= now || expiry > completion) throw Error(400, "Thời hạn báo giá phải trước ngày hoàn thành và ở tương lai.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var request = await db.Set<CustomOrderRequest>().SingleOrDefaultAsync(x => x.Id == requestId, ct) ?? throw Error(404, "Không tìm thấy yêu cầu.");
+        // Admin phải đọc lại nếu khách đã sửa yêu cầu trước khi phát hành báo giá.
         if (request.BouquetSnapshot is not null && input.RequestUpdatedAt != request.UpdatedAt)
             throw Error(409, "Yêu cầu bó hoa đã thay đổi. Tải lại trước khi phát hành báo giá.");
         var quote = await db.Set<CustomQuotation>().SingleAsync(x => x.CustomOrderRequestId == requestId, ct);
@@ -266,6 +267,7 @@ public sealed class CustomOrderService(HoaSapDbContext db, IGhnStagingAddressCat
         var fullAddress = wardName is null ? streetAddress : $"{streetAddress}, {wardName}, {provinceName}";
         var address = $"ReceiverName: {receiverName}; ReceiverPhone: {receiverPhone}; ReceiverEmail: {customer?.Email ?? ""}; Address: {fullAddress}";
         var key = input.IdempotencyKey.Trim();
+        // Kiểm tra lượt cũ trước điều kiện Approved để retry sau khi trạng thái đã thành CheckedOut.
         var old = await db.Set<CustomOrderCheckout>().SingleOrDefaultAsync(x => x.CustomerId == customerId && x.IdempotencyKey == key, ct);
         if (old is not null)
         {
@@ -303,6 +305,7 @@ public sealed class CustomOrderService(HoaSapDbContext db, IGhnStagingAddressCat
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         var context = await LifecycleContext(id, ct);
         if (context.Order.OrderStatus is "Cancelled" or "Expired" or "Completed") throw Error(409, "Đơn đã kết thúc.");
+        // Chỉ tính tiền backend đã xác nhận, theo mức cọc của revision liên kết với đơn.
         if (context.Paid < context.Revision.DepositAmount) throw Error(409, "Chưa đủ tiền cọc để bắt đầu sản xuất.");
         if (context.Quote.Status is not ("CheckedOut" or "Production")) throw Error(409, "Đơn chưa sẵn sàng sản xuất.");
         if (context.Quote.Status == "Production") { await tx.CommitAsync(ct); return ToLifecycle(context, "Production", context.Order.OrderStatus); }

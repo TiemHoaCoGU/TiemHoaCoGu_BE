@@ -61,6 +61,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
             if (await db.GatewayPaymentIntents.AnyAsync(x => x.OrderId == order.Id && (x.Status == "Pending" || x.Status == "Unknown" || x.Status == "Accepted" || x.ReconciliationStatus == "ReconciliationRequired"), ct)) throw new BusinessException(409, "Đơn có giao dịch chưa hoàn tất hoặc cần đối soát.");
             var paid = await PaidAsync(order.Id, ct);
             if (request.Amount > order.TotalAmount - paid) throw new BusinessException(400, "Số tiền vượt phần còn lại.");
+            // Với hoa đặt riêng, lần thu đầu phải đạt tiền cọc của báo giá đã checkout.
             var custom = await db.Set<CustomOrderCheckout>().SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
             if (custom is not null && paid == 0)
             {
@@ -184,6 +185,7 @@ public sealed class GatewayPaymentService(HoaSapDbContext db, IPaymentGateway ga
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return new(true, false, intent.OrderId);
     }
 
+    // Luồng mô phỏng tự tạo payload có chữ ký để chạy thử handler. Payload này do ứng dụng sinh.
     public async Task<GatewayWebhookResponse> SimulateSandboxWebhookAsync(Guid ownerId, Guid orderId, bool success, string? responseCode, CancellationToken ct = default)
     {
         var cfg = options.Value;

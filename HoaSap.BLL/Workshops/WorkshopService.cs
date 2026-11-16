@@ -136,6 +136,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         var key = r.IdempotencyKey?.Trim();
         if (r.IdempotencyKey is not null && (string.IsNullOrWhiteSpace(key) || key.Length > 100)) throw new BusinessException(400, "Idempotency key không hợp lệ.");
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        // Khóa thuộc về một khách và một nội dung đặt vé. So fingerprint trước khi tăng số chỗ.
         var requestFingerprint = Fingerprint(sessionId, customerId, r);
         if (!string.IsNullOrEmpty(key))
         {
@@ -163,6 +164,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         var w = await db.Workshops.FirstOrDefaultAsync(x => x.Id == s.WorkshopId, ct) ?? throw new BusinessException(404, "Không tìm thấy workshop.");
         if (!w.IsActive || s.SessionStatus is "Cancelled" or "Closed" || SessionStartUtc(s) <= DateTime.UtcNow) throw new BusinessException(409, "Ca học không còn nhận booking.");
         if (s.BookedSlots + r.TicketCount > s.Capacity) throw new BusinessException(409, "Ca học không đủ chỗ.");
+        // Giữ chỗ và tạo booking cùng transaction để rollback cả hai nếu lưu thất bại.
         s.BookedSlots += r.TicketCount; SetFullOrOpen(s);
         var now = DateTime.UtcNow; var total = decimal.Round(w.BasePrice * r.TicketCount, 0); var deposit = decimal.Round(total * DepositRate, 0);
         var b = new WorkshopBooking { SessionId = sessionId, CustomerId = customerId, BookingCode = "WS-" + Guid.NewGuid().ToString("N")[..10].ToUpperInvariant(), CustomerName = r.CustomerName?.Trim() ?? "", CustomerPhone = r.CustomerPhone?.Trim() ?? "", CustomerEmail = r.CustomerEmail?.Trim() ?? "", TicketCount = r.TicketCount, TotalAmount = total, DepositAmount = deposit, RemainingAmount = total, BookingStatus = total == 0 ? "confirmed" : "pending", HoldExpiresAt = now.AddMinutes(10), CreatedAt = now };
@@ -170,6 +172,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         db.WorkshopBookings.Add(b); await db.SaveChangesAsync(ct); await tx.CommitAsync(ct); return ToDto(b, 0, null);
     }
 
+    // Worker chạy định kỳ. Hết hạn pending và trả số chỗ về WorkshopSessions cùng transaction.
     public async Task ExpirePendingBookingsAsync(CancellationToken ct = default)
     {
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct); await ExpirePendingBookingsCoreAsync(ct); await tx.CommitAsync(ct);
@@ -228,6 +231,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         s.SessionStatus = "Closed"; await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
     }
 
+    // Hủy booking, trả chỗ và tạo yêu cầu hoàn tiền nếu có tiền đã ghi nhận.
     public async Task CancelBookingAsync(Guid id, Guid? customerId, bool staff, string? reason, CancellationToken ct = default)
     {
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
@@ -282,6 +286,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
     }
 
+    // Khách báo chuyển khoản tạo PendingVerification. Staff ghi nhận khoản đã thu có thể ghi Paid.
     public async Task RecordBookingPaymentAsync(Guid bookingId, ManualPaymentRequest r, Guid userId, bool isStaff, CancellationToken ct = default)
     {
         var paymentMethod = r.PaymentMethod?.Trim() ?? "";
@@ -355,6 +360,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         await tx.CommitAsync(ct);
     }
 
+    // Đổi Payment đang chờ sang Paid và cập nhật số dư booking trong cùng transaction.
     public async Task ConfirmBookingPaymentAsync(Guid bookingId, string transactionCode, Guid staffId, CancellationToken ct = default)
     {
         var code = transactionCode?.Trim() ?? "";
@@ -396,6 +402,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         await db.SaveChangesAsync(ct); await tx.CommitAsync(ct);
     }
 
+    // Đọc ca và tiền thực nhận. Check-in thành công ghi attended và CheckedInAt vào WorkshopBookings.
     public async Task CheckInAsync(Guid id, bool noShow, CancellationToken ct = default)
     {
         await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
@@ -418,6 +425,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         var b = await db.WorkshopBookings.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id && (staff || x.CustomerId == customerId), ct) ?? throw new BusinessException(404, "Không tìm thấy booking.");
         var s = await db.WorkshopSessions.AsNoTracking().FirstOrDefaultAsync(x => x.Id == b.SessionId, ct) ?? throw new BusinessException(404, "Không tìm thấy ca học.");
         var w = await db.Workshops.AsNoTracking().FirstOrDefaultAsync(x => x.Id == s.WorkshopId, ct) ?? throw new BusinessException(404, "Không tìm thấy workshop.");
+        // Đủ cọc có thể xác nhận chỗ. Chỉ booking đã trả đủ mới có ảnh QR.
         var issued = WorkshopTicketCodec.Issued(b);
         string? qr = null, url = null;
         if (issued)
@@ -527,6 +535,7 @@ public sealed class WorkshopService(HoaSapDbContext db, WorkshopTicketCodec? tic
         if (paid == 0 && DateTime.UtcNow >= SessionStartUtc(s).AddHours(-24) && amount < b.TotalAmount) throw new BusinessException(409, "Booking trong 24 giờ trước buổi học phải thanh toán đủ ngay lần đầu.");
         if (after > b.TotalAmount) throw new BusinessException(400, "Số tiền thanh toán vượt quá tổng booking.");
     }
+    // Đủ cọc xác nhận chỗ. RemainingAmount về 0 mới đạt điều kiện nhận QR.
     internal static void ApplyBookingPayment(WorkshopBooking b, decimal paid, decimal amount)
     {
         var after = paid + amount;
