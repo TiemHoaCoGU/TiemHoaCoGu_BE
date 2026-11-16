@@ -151,12 +151,13 @@ public sealed class WorkshopRefundAuditTests : ApiTestBase
         using var workshopJson = JsonDocument.Parse(await workshopResponse.Content.ReadAsStringAsync());
         var workshopId = workshopJson.RootElement.GetProperty("id").GetGuid();
 
-        var sessionTime = DateTime.UtcNow.AddHours(24);
+        var vnNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"));
+        var sessionDate = vnNow.Date.AddDays(1);
         var sessionResponse = await admin.PostAsync($"/api/workshops/{workshopId}/sessions", Json(new
         {
-            sessionDate = sessionTime.Date,
-            startTime = sessionTime.ToString("HH:mm:ss"),
-            endTime = sessionTime.AddHours(2).ToString("HH:mm:ss"),
+            sessionDate = sessionDate,
+            startTime = "14:00:00",
+            endTime = "16:00:00",
             location = "Studio 48h",
             capacity = 5
         }));
@@ -229,12 +230,13 @@ public sealed class WorkshopRefundAuditTests : ApiTestBase
         using var workshopJson = JsonDocument.Parse(await workshopResponse.Content.ReadAsStringAsync());
         var workshopId = workshopJson.RootElement.GetProperty("id").GetGuid();
 
-        var sessionTime = DateTime.UtcNow.AddDays(2);
+        var vnNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"));
+        var sessionDate = vnNow.Date.AddDays(2);
         var sessionResponse = await admin.PostAsync($"/api/workshops/{workshopId}/sessions", Json(new
         {
-            sessionDate = sessionTime.Date,
-            startTime = sessionTime.ToString("HH:mm:ss"),
-            endTime = sessionTime.AddHours(2).ToString("HH:mm:ss"),
+            sessionDate = sessionDate,
+            startTime = "14:00:00",
+            endTime = "16:00:00",
             location = "Studio Cancel",
             capacity = 5
         }));
