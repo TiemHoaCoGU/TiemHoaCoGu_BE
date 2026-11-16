@@ -446,7 +446,15 @@ public sealed class CommerceService(HoaSapDbContext db, ICarrierAdapter? carrier
         if (!staff && !await db.Orders.AnyAsync(x => x.Id == orderId && x.CustomerId == customerId, ct)) throw NF("Không tìm thấy giao hàng");
         if (string.IsNullOrWhiteSpace(delivery.TrackingNumber) || carrier is null or DisabledCarrier)
             return new CarrierTrackingResult(true, delivery.TrackingNumber, delivery.DeliveryStatus, "Local tracking", DateTime.UtcNow, null);
-        return await carrier.TrackShipmentAsync(delivery.TrackingNumber, ct);
+        var result = await carrier.TrackShipmentAsync(delivery.TrackingNumber, ct);
+        if (result.RawResponse == "SandboxEmulation")
+        {
+            if (string.Equals(delivery.DeliveryStatus, "Delivered", StringComparison.OrdinalIgnoreCase))
+                return new CarrierTrackingResult(true, delivery.TrackingNumber, "delivered", "Giao hàng thành công (SandboxEmulation=true)", DateTime.UtcNow, "SandboxEmulation");
+            if (string.Equals(delivery.DeliveryStatus, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                return new CarrierTrackingResult(true, delivery.TrackingNumber, "cancel", "Đã hủy vận đơn (SandboxEmulation=true)", DateTime.UtcNow, "SandboxEmulation");
+        }
+        return result;
     }
 
     async Task SetCustomStatusAsync(Guid orderId, string status, CancellationToken ct)
